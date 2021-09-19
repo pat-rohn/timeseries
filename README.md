@@ -13,8 +13,6 @@ Replace usernames and passwords to your needs.
 sudo -u postgres psql
 ```
 
-
-
 ``` SQL
 CREATE USER "grafanawriteuser";  
 ALTER USER "grafanawriteuser" WITH PASSWORD 'GrafanaWritePassw0rd';  
@@ -69,7 +67,7 @@ sudo netstat -ltnp | grep postgres
 ### backup db
 
 ```Terminal
-pg_dump -h 127.0.0.1 --user webuser -d plottydb --format plain --file "2019_09_10-livingroom.dump" -t climate
+pg_dump -h 127.0.0.1 --user myuser -d plottydb --format plain --file "2019_09_10-livingroom.dump" -t measurements
 ```
 
 ### restore db
@@ -82,20 +80,19 @@ postgres@raspberrypi:/home/pi/data$ psql  plottydb < 2019_10_11-livingroom.pgsql
 ### Correct timeshift
 
 ``` SQL
-UPDATE wetter_data SET timestamp = timestamp - INTERVAL '2 hour' WHERE timestamp > '2020-10-24 20:00:00.000';
-UPDATE weatherts SET humidity = 100.0 WHERE humidity > 4000;
+UPDATE measurements SET timestamp = timestamp - INTERVAL '2 hour' WHERE timestamp > '2020-10-24 20:00:00.000';
 ```
 
 ### Others useful commands
 
 ``` SQL
-postgres-# DROP OWNED BY webuser;
-postgres-# DROP USER "webuser";
+postgres-# DROP OWNED BY myuser;
+postgres-# DROP USER "myuser";
 sudo su postgres
-psql -U postgres -d plottydb -c "Select count(timestamp) from climate;"
-psql -U postgres -d plottydb -h 127.0.0.1 -c "Select count(timestamp) from climate;"
-select * from climate order by timestamp desc limit 20;
-select * from climate where timestamp > '2018-11-04 14:45:28.367' order by timestamp asc limit 10;
+psql -U postgres -d plottydb -c "Select count(timestamp) from measurements;"
+psql -U postgres -d plottydb -h 127.0.0.1 -c "Select count(timestamp) from measurements;"
+select * from measurements order by timestamp desc limit 20;
+select * from measurements where timestamp > '2018-11-04 14:45:28.367' order by timestamp asc limit 10;
 ```
 
 ## Timeseries
@@ -138,7 +135,7 @@ CREATE TABLE measurements (
 SELECT * FROM create_hypertable('measurements','time');
 ```
 
-timescaledb-parallel-copy --verbose  --connection="host=localhost user=webuser password=PlottyPW" --db-name ts_database --table forcex --file old_forcex.csv --workers 4 --copy-options "CSV"
+timescaledb-parallel-copy --verbose  --connection="host=localhost --db-name ts_database --table measurements --file old_forcex.csv --workers 4 --copy-options "CSV"
 
 - [TimescaleDB Reading](https://docs.timescale.com/latest/using-timescaledb/reading-data)
 - [TimescaleDB hypertables](https://docs.timescale.com/latest/using-timescaledb/hypertables)
