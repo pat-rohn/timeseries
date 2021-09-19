@@ -11,7 +11,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	_ "github.com/lib/pq"
-	//_ "github.com/mattn/go-sqlite3"
+	_ "github.com/mattn/go-sqlite3"
 )
 
 const (
