@@ -1,4 +1,4 @@
-package dbhandler
+package timeseries
 
 import "fmt"
 
