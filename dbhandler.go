@@ -486,6 +486,24 @@ func GetDefaultDBConfig() DBConfig {
 	}
 }
 
+// CreateTimeseriesTable creates a table for timeseries values.
+// Consider adding timescaledb features for postgres.
+func (dbh *DbHandler) CreateTimeseriesTable() error {
+	timeStampStr := "DATETIME"
+	if dbh.conf.UsePostgres {
+		timeStampStr = "TIMESTAMP"
+	}
+	sqlStr := `CREATE TABLE IF NOT EXISTS ` + dbh.conf.TableName + ` (
+		time ` + timeStampStr + `,
+		tag        TEXT                NOT NULL,
+		value      DOUBLE PRECISION    NULL,
+		comment    TEXT                DEFAULT '',
+		unique (time, tag)
+	   );
+	 `
+	return dbh.writeToDB(sqlStr)
+}
+
 //InsertTimeseries stores values into timeseries table
 func (dbh *DbHandler) InsertTimeseries(is TimeseriesImportStruct, acceptDoubleTimestamps bool) error {
 	var str strings.Builder
