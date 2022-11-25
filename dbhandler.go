@@ -37,7 +37,7 @@ type DbHandler struct {
 	db   *sql.DB
 }
 
-//New creates a DbHandler
+// New creates a DbHandler
 func New(conf DBConfig) DbHandler {
 	dbh := DbHandler{
 		conf: conf,
@@ -49,7 +49,7 @@ func New(conf DBConfig) DbHandler {
 	return dbh
 }
 
-//NewDefault creates DbHandler with default a configuration
+// NewDefault creates DbHandler with default a configuration
 func NewDefault() DbHandler {
 	dbconf := GetDefaultDBConfig()
 	dbh := DbHandler{conf: dbconf,
@@ -82,7 +82,7 @@ func (dbh *DbHandler) CreateDatabase() error {
 		dbh.db = database
 	} else {
 		log.WithFields(logFields).Tracef("Create Folder: %v", dbh.conf.IPOrPath)
-		os.MkdirAll(dbh.conf.IPOrPath, 0755) // linux: read-write
+		os.MkdirAll(dbh.conf.IPOrPath, 0644)
 		database, err := sql.Open("sqlite3", dbh.conf.IPOrPath+dbh.conf.Name)
 		if err != nil {
 			log.WithFields(logFields).Errorf(
@@ -100,15 +100,16 @@ func (dbh *DbHandler) CreateDatabase() error {
 // CloseDatabase closes database connection
 func (dbh *DbHandler) CloseDatabase() error {
 	err := dbh.db.Close()
-	log.WithField("package", logPkg).Infof("Closed database with name %s with error %f",
+	log.WithField("package", logPkg).Infof("Closed database %s",
 		dbh.conf.Name, err)
 	if err != nil {
-		log.WithField("package", logPkg).Warnf("Closing failed %f", err)
+		log.WithField("package", logPkg).Warnf("Closing %s failed %f",
+			dbh.conf.Name, err)
 	}
 	return err
 }
 
-//InsertIntoDatabase stores values into database
+// InsertIntoDatabase stores values into database
 func (dbh *DbHandler) InsertIntoDatabase(tableName string, is ImportStruct) error {
 	//defer dbh.db.Close()
 	var str strings.Builder
@@ -214,7 +215,7 @@ func (dbh *DbHandler) InsertIntoDatabase(tableName string, is ImportStruct) erro
 	return nil
 }
 
-//InsertRowsToTable imports importStructs into table and returns failed rows
+// InsertRowsToTable imports importStructs into table and returns failed rows
 func (dbh *DbHandler) InsertRowsToTable(tableName string, importStructs []ImportRowStruct) ([]ImportRowStruct, error) {
 	logFields := log.Fields{"package": logPkg, "func": "InsertRowsToTable"}
 
@@ -504,7 +505,7 @@ func (dbh *DbHandler) CreateTimeseriesTable() error {
 	return dbh.writeToDB(sqlStr)
 }
 
-//InsertTimeseries stores values into timeseries table
+// InsertTimeseries stores values into timeseries table
 func (dbh *DbHandler) InsertTimeseries(is TimeseriesImportStruct, acceptDoubleTimestamps bool) error {
 	var str strings.Builder
 	log.WithField("package", logPkg).Tracef(
@@ -588,19 +589,18 @@ func (dbh *DbHandler) writeToDB(sqlStr string) error {
 		log.WithField("package", logPkg).Errorf("Failed to prepare: %v", err)
 		return fmt.Errorf("Failed to prepare: %v", err)
 	}
-	time.Sleep(time.Millisecond * 200)
+
 	_, err = stmt.Exec()
 	if err != nil {
 		log.WithField("package", logPkg).Errorf("Failed to execute: %v", err)
 		return err
 	}
 
-	time.Sleep(time.Millisecond * 200)
 	err = tx.Commit()
 	if err != nil {
 		log.WithField("package", logPkg).Errorf("Failed to commit: %v", err)
 		return err
 	}
-	time.Sleep(time.Millisecond * 200)
+
 	return nil
 }
