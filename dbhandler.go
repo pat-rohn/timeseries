@@ -34,15 +34,13 @@ type DBConfig struct {
 
 type DbHandler struct {
 	conf DBConfig
-	db   *sql.DB
+	DB   *sql.DB
 }
 
 // New creates a DbHandler
 func New(conf DBConfig) DbHandler {
-	dbh := DbHandler{
-		conf: conf,
-		db:   nil}
-	if err := dbh.CreateDatabase(); err != nil {
+	dbh := DbHandler{conf: conf}
+	if err := dbh.OpenDatabase(); err != nil {
 		log.WithField("package", logPkg).Fatalf(
 			"Failed to create database: %v", err)
 	}
@@ -52,17 +50,16 @@ func New(conf DBConfig) DbHandler {
 // NewDefault creates DbHandler with default a configuration
 func NewDefault() DbHandler {
 	dbconf := GetDefaultDBConfig()
-	dbh := DbHandler{conf: dbconf,
-		db: nil}
-	if err := dbh.CreateDatabase(); err != nil {
+	dbh := DbHandler{conf: dbconf}
+	if err := dbh.OpenDatabase(); err != nil {
 		log.WithField("package", logPkg).Fatalf(
 			"Failed to create database: %v", err)
 	}
 	return dbh
 }
 
-// CreateDatabase creates a sqlite or postgres db
-func (dbh *DbHandler) CreateDatabase() error {
+// OpenDatabase creates a sqlite or postgres db
+func (dbh *DbHandler) OpenDatabase() error {
 
 	logFields := log.Fields{"package": logPkg, "func": "CreateDatabase"}
 	log.WithFields(logFields).Infof("Create/Open database with path/ip:%s with name %s",
@@ -77,19 +74,28 @@ func (dbh *DbHandler) CreateDatabase() error {
 		if err != nil {
 			log.WithField("package", logPkg).Errorf(
 				"Failed to open db %v", err)
-			return fmt.Errorf("Failed to open db %v", err)
+			return fmt.Errorf("failed to open db %v", err)
 		}
-		dbh.db = database
+		dbh.DB = database
 	} else {
-		log.WithFields(logFields).Tracef("Create Folder: %v", dbh.conf.IPOrPath)
-		os.MkdirAll(dbh.conf.IPOrPath, 0644)
+		if len(dbh.conf.IPOrPath) > 0 {
+			log.WithFields(logFields).Tracef("Create Folder: %v", dbh.conf.IPOrPath)
+			if _, err := os.Stat(dbh.conf.IPOrPath); err != nil {
+				if os.IsNotExist(err) {
+					err := os.MkdirAll(dbh.conf.IPOrPath, 0644)
+					if err != nil {
+						log.WithFields(logFields).Errorf("Failed to create path %v", err)
+					}
+				}
+			}
+		}
+
 		database, err := sql.Open("sqlite3", dbh.conf.IPOrPath+dbh.conf.Name)
 		if err != nil {
-			log.WithFields(logFields).Errorf(
-				"Failed to open db %v", err)
+			log.WithFields(logFields).Errorf("Failed to open db %v", err)
 			return fmt.Errorf("Failed to open db %v", err)
 		}
-		dbh.db = database
+		dbh.DB = database
 	}
 	log.WithFields(logFields).Infof("Opened database with name %s ",
 		dbh.conf.Name)
@@ -99,14 +105,14 @@ func (dbh *DbHandler) CreateDatabase() error {
 
 // CloseDatabase closes database connection
 func (dbh *DbHandler) CloseDatabase() error {
-	err := dbh.db.Close()
-	log.WithField("package", logPkg).Infof("Closed database %s",
-		dbh.conf.Name, err)
+	err := dbh.DB.Close()
+	log.WithField("package", logPkg).Infof("Closed database %s", dbh.conf.Name)
 	if err != nil {
 		log.WithField("package", logPkg).Warnf("Closing %s failed %f",
 			dbh.conf.Name, err)
+		return err
 	}
-	return err
+	return nil
 }
 
 // InsertIntoDatabase stores values into database
@@ -150,10 +156,9 @@ func (dbh *DbHandler) InsertIntoDatabase(tableName string, is ImportStruct) erro
 	sqlStr := str.String()[0 : len(str.String())-2]
 	sqlStr += ");"
 	log.WithField("package", logPkg).Tracef("create query: %s", sqlStr)
-	_, err := dbh.db.Exec(sqlStr)
+	_, err := dbh.DB.Exec(sqlStr)
 	if err != nil {
-		log.WithField("package", logPkg).Errorf(
-			"Failed to create db %v", err)
+		log.WithField("package", logPkg).Errorf("Failed to create db %v", err)
 		return fmt.Errorf("Failed to create db: %v", err)
 	}
 
@@ -248,7 +253,7 @@ func (dbh *DbHandler) InsertRowsToTable(tableName string, importStructs []Import
 
 // InsertRowToTable inserts one row into database
 func (dbh *DbHandler) InsertRowToTable(tableName string, is ImportRowStruct) error {
-	db := dbh.db
+	db := dbh.DB
 	var str strings.Builder
 	log.WithField("package", logPkg).Tracef(
 		"Columns: %v", is.Names)
@@ -282,8 +287,7 @@ func (dbh *DbHandler) InsertRowToTable(tableName string, is ImportRowStruct) err
 	log.WithField("package", logPkg).Tracef("create query: %s", sqlStr)
 	_, err := db.Exec(sqlStr)
 	if err != nil {
-		log.WithField("package", logPkg).Errorf(
-			"Failed to create db %v", err)
+		log.WithField("package", logPkg).Errorf("Failed to create db %v", err)
 		return fmt.Errorf("Failed to create db: %v", err)
 	}
 
@@ -347,7 +351,7 @@ func (dbh *DbHandler) ReadTPH() ImportStruct {
 	names := []string{"Temperature", "Pressure", "Humidity"}
 	sqlstr := `SELECT TIMESTAMP, Temperature, Pressure, Humidity FROM sensor_data WHERE Fetched = 0 ORDER BY Timestamp;`
 	log.WithFields(logFields).Tracef("Select statement: %v", sqlstr)
-	rows, err := dbh.db.Query(sqlstr)
+	rows, err := dbh.DB.Query(sqlstr)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -395,7 +399,7 @@ func (dbh *DbHandler) ReadAllTPH() ImportStruct {
 	names := []string{"Temperature", "Pressure", "Humidity"}
 	sqlstr := `SELECT TIMESTAMP, Temperature, Pressure, Humidity FROM living;`
 	log.WithFields(logFields).Tracef("Select statement: %v", sqlstr)
-	rows, err := dbh.db.Query(sqlstr)
+	rows, err := dbh.DB.Query(sqlstr)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -440,7 +444,7 @@ func (dbh *DbHandler) ReadAllTPH() ImportStruct {
 func (dbh *DbHandler) SetFetched(firstTimestamp string, lastTimestamp string) {
 	logFields := log.Fields{"package": logPkg, "fnct": "SetFetched"}
 	statement := "UPDATE sensor_data SET Fetched=? WHERE Timestamp<=? AND Timestamp>=?"
-	stmt, err := dbh.db.Prepare(statement)
+	stmt, err := dbh.DB.Prepare(statement)
 	if err != nil {
 		log.WithFields(logFields).Errorf("Failed to create statement ... :  %v, %v", err, statement)
 		return
@@ -467,7 +471,7 @@ func (dbh *DbHandler) AddColumnToTable(tableName string, columnName string) erro
 	logFields := log.Fields{"package": logPkg, "func": "AddColumnToTable"}
 	log.WithFields(logFields).Infof("Add %v to %v", columnName, tableName)
 
-	_, err := dbh.db.Exec(`ALTER TABLE ` + tableName +
+	_, err := dbh.DB.Exec(`ALTER TABLE ` + tableName +
 		` ADD COLUMN IF NOT EXISTS "` + columnName + `" REAL DEFAULT NULL;`)
 	if err != nil {
 		log.WithFields(logFields).Errorf("Failed to add column to table %v: %v", tableName, err)
@@ -478,7 +482,7 @@ func (dbh *DbHandler) AddColumnToTable(tableName string, columnName string) erro
 func GetDefaultDBConfig() DBConfig {
 	return DBConfig{
 		Name:        "data.db",
-		IPOrPath:    "./data/",
+		IPOrPath:    "",
 		UsePostgres: false,
 		User:        "webuser",
 		Password:    "PlottyPW",
@@ -494,19 +498,19 @@ func (dbh *DbHandler) CreateTimeseriesTable() error {
 	if dbh.conf.UsePostgres {
 		timeStampStr = "TIMESTAMP"
 	}
+
 	sqlStr := `CREATE TABLE IF NOT EXISTS ` + dbh.conf.TableName + ` (
 		time ` + timeStampStr + `,
 		tag        TEXT                NOT NULL,
 		value      DOUBLE PRECISION    NULL,
-		comment    TEXT                DEFAULT '',
-		unique (time, tag)
+		comment    TEXT                DEFAULT ''
 	   );
 	 `
 	return dbh.writeToDB(sqlStr)
 }
 
 // InsertTimeseries stores values into timeseries table
-func (dbh *DbHandler) InsertTimeseries(is TimeseriesImportStruct, acceptDoubleTimestamps bool) error {
+func (dbh *DbHandler) InsertTimeseries(is TimeseriesImportStruct, onClonflictDoNothing bool) error {
 	var str strings.Builder
 	log.WithField("package", logPkg).Tracef(
 		"Entries: %v", is.Values)
@@ -538,8 +542,8 @@ func (dbh *DbHandler) InsertTimeseries(is TimeseriesImportStruct, acceptDoubleTi
 		if entryIndex%100000 == 0 && entryIndex != 0 {
 			sqlStr := str.String()
 			sqlStr = sqlStr[0 : len(sqlStr)-2]
-			if !acceptDoubleTimestamps {
-				sqlStr += " on conflict  do nothing"
+			if onClonflictDoNothing {
+				sqlStr += " on conflict do nothing"
 			}
 			err := dbh.writeToDB(sqlStr)
 			if err != nil {
@@ -555,7 +559,7 @@ func (dbh *DbHandler) InsertTimeseries(is TimeseriesImportStruct, acceptDoubleTi
 	log.WithField("package", logPkg).Traceln("Finished creating string")
 	sqlStr := str.String()
 	sqlStr = sqlStr[0 : len(sqlStr)-2]
-	if !acceptDoubleTimestamps {
+	if onClonflictDoNothing {
 		sqlStr += " on conflict  do nothing"
 	}
 	err := dbh.writeToDB(sqlStr)
@@ -579,7 +583,7 @@ func (dbh *DbHandler) writeToDB(sqlStr string) error {
 			"full query: %s\n", sqlStr)
 	}
 
-	tx, err := dbh.db.Begin()
+	tx, err := dbh.DB.Begin()
 	if err != nil {
 		log.WithField("package", logPkg).Errorf("%v", err)
 		return err

@@ -48,11 +48,12 @@ func TestDb(t *testing.T) {
 	fmt.Printf("data:%+v", is)
 	dbh := NewDefault()
 
+	defer dbh.CloseDatabase()
 	err := dbh.InsertIntoDatabase("randomtest", is)
 	if err != nil {
-		t.Errorf("Failed to insert data:%v", err)
+		t.Fatalf("Failed to insert data:%v", err)
 	}
-	os.RemoveAll("./test")
+	err = os.Remove("data.db")
 	if err != nil {
 		t.Errorf("Failed to remove data:%v", err)
 	}
@@ -71,13 +72,17 @@ func TestDBStructs(t *testing.T) {
 		importRows = append(importRows, is)
 	}
 	dbh := NewDefault()
-
+	defer dbh.CloseDatabase()
 	_, err := dbh.InsertRowsToTable("migrateTest", importRows)
 	if err != nil {
-		t.Errorf("Failed to insert data:%v", err)
+		t.Fatalf("Failed to insert data:%v", err)
 	}
 	err = dbh.InsertIntoDatabase("migrateTest", CreateImportTable(importRows))
 	if err != nil {
 		t.Errorf("Failed to insert data after CreateImportTable:%v", err)
+	}
+	err = os.Remove("data.db")
+	if err != nil {
+		t.Errorf("Failed to remove data:%v", err)
 	}
 }
