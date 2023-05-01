@@ -11,7 +11,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	_ "github.com/lib/pq"
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 const (
@@ -90,7 +90,7 @@ func (dbh *DbHandler) OpenDatabase() error {
 			}
 		}
 
-		database, err := sql.Open("sqlite3", dbh.conf.IPOrPath+dbh.conf.Name)
+		database, err := sql.Open("sqlite", dbh.conf.IPOrPath+dbh.conf.Name)
 		if err != nil {
 			log.WithFields(logFields).Errorf("Failed to open db %v", err)
 			return fmt.Errorf("Failed to open db %v", err)
