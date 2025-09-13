@@ -17,10 +17,11 @@ import (
 )
 
 const (
-	logPkg            string = "dbhandler"
-	columnIntegerType int    = 0
-	columnFloatType   int    = 1
-	columnTextType    int    = 2
+	logPkg                 string = "dbhandler"
+	columnIntegerType      int    = 0
+	columnFloatType        int    = 1
+	columnTextType         int    = 2
+	DefaultTimeseriesTable string = "measurements"
 )
 
 type DBConfig struct {
@@ -30,7 +31,6 @@ type DBConfig struct {
 	User        string `json:"User"`
 	Password    string `json:"Password"`
 	Port        int    `json:"Port"`
-	TableName   string `json:"TableName"`
 }
 
 type DbHandler struct {
@@ -517,19 +517,18 @@ func GetDefaultDBConfig() DBConfig {
 		User:        "webuser",
 		Password:    "PlottyPW",
 		Port:        5432,
-		TableName:   "measurements",
 	}
 }
 
 // CreateTimeseriesTable creates a table for timeseries values.
 // Consider adding timescaledb features for postgres.
-func (dbh *DbHandler) CreateTimeseriesTable() error {
+func (dbh *DbHandler) CreateTimeseriesTable(tableName string) error {
 	timeStampStr := "DATETIME"
 	if dbh.conf.UsePostgres {
 		timeStampStr = "TIMESTAMP"
 	}
 
-	sqlStr := `CREATE TABLE IF NOT EXISTS ` + dbh.conf.TableName + ` (
+	sqlStr := `CREATE TABLE IF NOT EXISTS ` + tableName + ` (
 		time ` + timeStampStr + `,
 		tag        TEXT                NOT NULL,
 		value      DOUBLE PRECISION    NULL,
@@ -540,7 +539,7 @@ func (dbh *DbHandler) CreateTimeseriesTable() error {
 }
 
 // InsertTimeseries stores values into timeseries table
-func (dbh *DbHandler) InsertTimeseries(is TimeseriesImportStruct, onClonflictDoNothing bool) error {
+func (dbh *DbHandler) InsertTimeseries(is TimeseriesImportStruct, onClonflictDoNothing bool, table string) error {
 	var str strings.Builder
 	log.WithField("package", logPkg).Tracef(
 		"Entries: %v", is.Values)
@@ -548,10 +547,7 @@ func (dbh *DbHandler) InsertTimeseries(is TimeseriesImportStruct, onClonflictDoN
 		"Tag: %v", is.Tag)
 	str.Reset()
 
-	if len(dbh.conf.TableName) == 0 {
-		dbh.conf.TableName = "measurements"
-	}
-	str.WriteString("INSERT INTO " + dbh.conf.TableName + " (time, tag, value)")
+	str.WriteString("INSERT INTO " + table + " (time, tag, value)")
 	log.WithField("package", logPkg).Infof("Insert string: %v", str.String())
 	str.WriteString(" VALUES \n")
 
