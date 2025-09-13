@@ -2,10 +2,12 @@ package timeseries
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -16,7 +18,6 @@ import (
 
 const (
 	logPkg            string = "dbhandler"
-	isNumber          bool   = true
 	columnIntegerType int    = 0
 	columnFloatType   int    = 1
 	columnTextType    int    = 2
@@ -33,34 +34,39 @@ type DBConfig struct {
 }
 
 type DbHandler struct {
-	conf DBConfig
-	DB   *sql.DB
+	conf      DBConfig
+	DB        *sql.DB
+	mutex     sync.Mutex
+	semaphore chan struct{} // limit number of concurrent operations
+	timeout   time.Duration
 }
 
-// New creates a DbHandler
-func New(conf DBConfig) DbHandler {
-	dbh := DbHandler{conf: conf}
-	if err := dbh.OpenDatabase(); err != nil {
-		log.WithField("package", logPkg).Fatalf(
-			"Failed to create database: %v", err)
-	}
-	return dbh
-}
+var dbhandler *DbHandler
+var once sync.Once
 
-// NewDefault creates DbHandler with default a configuration
-func NewDefault() DbHandler {
-	dbconf := GetDefaultDBConfig()
-	dbh := DbHandler{conf: dbconf}
-	if err := dbh.OpenDatabase(); err != nil {
-		log.WithField("package", logPkg).Fatalf(
-			"Failed to create database: %v", err)
-	}
-	return dbh
+// Singleton for dbhandler
+func DBHandler(conf DBConfig) *DbHandler {
+	once.Do(func() {
+		if dbhandler != nil {
+			log.Fatalf("DbHandler already created with config: %+v", dbhandler.conf)
+		}
+		dbhandler = &DbHandler{
+			conf:      conf,
+			mutex:     sync.Mutex{},
+			timeout:   time.Second * 10,
+			semaphore: make(chan struct{}, 10),
+		}
+		if err := dbhandler.openDatabase(); err != nil {
+			log.WithField("package", logPkg).Fatalf(
+				"Failed to create database: %v", err)
+		}
+		log.Infof("%+v", dbhandler.conf)
+	})
+	return dbhandler
 }
 
 // OpenDatabase creates a sqlite or postgres db
-func (dbh *DbHandler) OpenDatabase() error {
-
+func (dbh *DbHandler) openDatabase() error {
 	logFields := log.Fields{"package": logPkg, "func": "CreateDatabase"}
 	log.WithFields(logFields).Infof("Create/Open database with path/ip:%s with name %s",
 		dbh.conf.IPOrPath, dbh.conf.Name)
@@ -93,7 +99,7 @@ func (dbh *DbHandler) OpenDatabase() error {
 		database, err := sql.Open("sqlite", dbh.conf.IPOrPath+dbh.conf.Name)
 		if err != nil {
 			log.WithFields(logFields).Errorf("Failed to open db %v", err)
-			return fmt.Errorf("Failed to open db %v", err)
+			return fmt.Errorf("failed to open db %v", err)
 		}
 		dbh.DB = database
 	}
@@ -103,8 +109,7 @@ func (dbh *DbHandler) OpenDatabase() error {
 	return nil
 }
 
-// CloseDatabase closes database connection
-func (dbh *DbHandler) CloseDatabase() error {
+func (dbh *DbHandler) Close() error {
 	err := dbh.DB.Close()
 	log.WithField("package", logPkg).Infof("Closed database %s", dbh.conf.Name)
 	if err != nil {
@@ -117,7 +122,6 @@ func (dbh *DbHandler) CloseDatabase() error {
 
 // InsertIntoDatabase stores values into database
 func (dbh *DbHandler) InsertIntoDatabase(tableName string, is ImportStruct) error {
-	//defer dbh.db.Close()
 	var str strings.Builder
 	log.WithField("package", logPkg).Tracef(
 		"Columns: %v", is.Names)
@@ -156,10 +160,16 @@ func (dbh *DbHandler) InsertIntoDatabase(tableName string, is ImportStruct) erro
 	sqlStr := str.String()[0 : len(str.String())-2]
 	sqlStr += ");"
 	log.WithField("package", logPkg).Tracef("create query: %s", sqlStr)
-	_, err := dbh.DB.Exec(sqlStr)
+	err := dbh.execute(func() error {
+		_, err := dbh.DB.Exec(sqlStr)
+		if err != nil {
+			log.WithField("package", logPkg).Errorf("Failed to create db %v", err)
+			return fmt.Errorf("failed to execute sql-statement: %v", err)
+		}
+		return nil
+	})
 	if err != nil {
-		log.WithField("package", logPkg).Errorf("Failed to create db %v", err)
-		return fmt.Errorf("Failed to create db: %v", err)
+		return err
 	}
 
 	str.Reset()
@@ -210,20 +220,17 @@ func (dbh *DbHandler) InsertIntoDatabase(tableName string, is ImportStruct) erro
 	sqlStr = str.String()
 
 	sqlStr = sqlStr[0 : len(sqlStr)-2]
-
 	if err := dbh.writeToDB(sqlStr); err != nil {
 		log.WithField("package", logPkg).Errorf("Failed to execute sql-statement: %v\n", err)
-		return fmt.Errorf("Failed to execute sql-statement: %v", err)
+		return fmt.Errorf("failed to execute sql-statement: %v", err)
 	}
 	log.WithField("package", logPkg).Infof("Succesfully imported values into table: %v", tableName)
-	time.Sleep(time.Millisecond * 200)
 	return nil
 }
 
 // InsertRowsToTable imports importStructs into table and returns failed rows
 func (dbh *DbHandler) InsertRowsToTable(tableName string, importStructs []ImportRowStruct) ([]ImportRowStruct, error) {
 	logFields := log.Fields{"package": logPkg, "func": "InsertRowsToTable"}
-
 	var failedImports []ImportRowStruct
 
 	for _, is := range importStructs {
@@ -246,14 +253,14 @@ func (dbh *DbHandler) InsertRowsToTable(tableName string, importStructs []Import
 	}
 	if len(failedImports) > 0 {
 		log.WithFields(logFields).Errorf("Failed to imports: %v", len(failedImports))
-		return failedImports, fmt.Errorf("Failed to imports: %v", len(failedImports))
+		return failedImports, fmt.Errorf("failed to imports: %v", len(failedImports))
 	}
 	return failedImports, nil
 }
 
 // InsertRowToTable inserts one row into database
 func (dbh *DbHandler) InsertRowToTable(tableName string, is ImportRowStruct) error {
-	db := dbh.DB
+
 	var str strings.Builder
 	log.WithField("package", logPkg).Tracef(
 		"Columns: %v", is.Names)
@@ -285,10 +292,17 @@ func (dbh *DbHandler) InsertRowToTable(tableName string, is ImportRowStruct) err
 	sqlStr := str.String()[0 : len(str.String())-2]
 	sqlStr += ", Fetched INTEGER DEFAULT 0);"
 	log.WithField("package", logPkg).Tracef("create query: %s", sqlStr)
-	_, err := db.Exec(sqlStr)
+
+	err := dbh.execute(func() error {
+		_, err := dbh.DB.Query(sqlStr)
+		if err != nil {
+			log.WithField("package", logPkg).Errorf("Failed to create db %v", err)
+			return fmt.Errorf("failed to execute sql string: %v", err)
+		}
+		return nil
+	})
 	if err != nil {
-		log.WithField("package", logPkg).Errorf("Failed to create db %v", err)
-		return fmt.Errorf("Failed to create db: %v", err)
+		return err
 	}
 
 	str.Reset()
@@ -339,18 +353,18 @@ func (dbh *DbHandler) InsertRowToTable(tableName string, is ImportRowStruct) err
 
 	if err := dbh.writeToDB(sqlStr); err != nil {
 		log.WithField("package", logPkg).Errorf("Failed to execute sql-statement: %v\n", err)
-		return fmt.Errorf("Failed to execute sql-statement: %v", err)
+		return fmt.Errorf("failed to execute sql-statement: %v", err)
 	}
-	log.WithField("package", logPkg).Infof("Succesfully imported values into table: %v", tableName)
-
 	return nil
 }
 
 func (dbh *DbHandler) ReadTPH() ImportStruct {
 	logFields := log.Fields{"package": logPkg, "fnct": "readTPH"}
+
 	names := []string{"Temperature", "Pressure", "Humidity"}
 	sqlstr := `SELECT TIMESTAMP, Temperature, Pressure, Humidity FROM sensor_data WHERE Fetched = 0 ORDER BY Timestamp;`
 	log.WithFields(logFields).Tracef("Select statement: %v", sqlstr)
+
 	rows, err := dbh.DB.Query(sqlstr)
 	if err != nil {
 		log.Fatal(err)
@@ -396,14 +410,24 @@ func (dbh *DbHandler) ReadTPH() ImportStruct {
 
 func (dbh *DbHandler) ReadAllTPH() ImportStruct {
 	logFields := log.Fields{"package": logPkg, "fnct": "readTPH"}
+
 	names := []string{"Temperature", "Pressure", "Humidity"}
 	sqlstr := `SELECT TIMESTAMP, Temperature, Pressure, Humidity FROM living;`
 	log.WithFields(logFields).Tracef("Select statement: %v", sqlstr)
-	rows, err := dbh.DB.Query(sqlstr)
+	var rows *sql.Rows
+	err := dbh.execute(func() error {
+		var err error
+		rows, err = dbh.DB.Query(sqlstr)
+		if err != nil {
+			log.Fatal(err)
+		}
+		return nil
+	})
 	if err != nil {
-		log.Fatal(err)
+		log.WithFields(logFields).Errorf("Failed to read from db: %v", err)
+		return ImportStruct{}
 	}
-
+	defer rows.Close()
 	var timestamps []string
 	var Temperatures []string
 	var Pressures []string
@@ -441,41 +465,47 @@ func (dbh *DbHandler) ReadAllTPH() ImportStruct {
 	}
 }
 
-func (dbh *DbHandler) SetFetched(firstTimestamp string, lastTimestamp string) {
+func (dbh *DbHandler) SetFetched(firstTimestamp string, lastTimestamp string) error {
 	logFields := log.Fields{"package": logPkg, "fnct": "SetFetched"}
+
 	statement := "UPDATE sensor_data SET Fetched=? WHERE Timestamp<=? AND Timestamp>=?"
-	stmt, err := dbh.DB.Prepare(statement)
+	err := dbh.execute(func() error {
+		res, err := dbh.DB.Exec(statement)
+		if err != nil {
+			log.WithFields(logFields).Errorf("Failed to get affected rows ... :  %v, %v", err, statement)
+			return err
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			log.WithFields(logFields).Errorf("Failed to get affected rows ... :  %v, %v", err, statement)
+			return err
+		}
+		log.WithFields(logFields).Infof("Rows Affected: %v", affected)
+		return nil
+	})
 	if err != nil {
-		log.WithFields(logFields).Errorf("Failed to create statement ... :  %v, %v", err, statement)
-		return
-	}
-	log.WithFields(logFields).Infof("Uploaded from %v till %v",
-		firstTimestamp, lastTimestamp)
-	res, err := stmt.Exec("1", lastTimestamp, firstTimestamp)
-	if err != nil {
-		log.WithFields(logFields).Errorf("Exec statement failed ... :  %v, %v", err, statement)
-		return
+		return err
 	}
 
-	affect, err := res.RowsAffected()
-	if err != nil {
-		log.WithFields(logFields).Errorf("Failed to get affected rows ... :  %v, %v", err, statement)
-		return
-	}
-
-	log.WithFields(logFields).Infof("Rows Affected: %v", affect)
+	return nil
 }
 
 // AddColumnToTable adds a column with type number into table (real default null))
 func (dbh *DbHandler) AddColumnToTable(tableName string, columnName string) error {
 	logFields := log.Fields{"package": logPkg, "func": "AddColumnToTable"}
-	log.WithFields(logFields).Infof("Add %v to %v", columnName, tableName)
 
-	_, err := dbh.DB.Exec(`ALTER TABLE ` + tableName +
-		` ADD COLUMN IF NOT EXISTS "` + columnName + `" REAL DEFAULT NULL;`)
-	if err != nil {
-		log.WithFields(logFields).Errorf("Failed to add column to table %v: %v", tableName, err)
-	}
+	err := dbh.execute(func() error {
+		log.WithFields(logFields).Infof("Add %v to %v", columnName, tableName)
+
+		_, err := dbh.DB.Exec(`ALTER TABLE ` + tableName +
+			` ADD COLUMN IF NOT EXISTS "` + columnName + `" REAL DEFAULT NULL;`)
+		if err != nil {
+			log.WithFields(logFields).Errorf("Failed to add column to table %v: %v", tableName, err)
+			return err
+		}
+
+		return nil
+	})
 	return err
 }
 
@@ -582,29 +612,25 @@ func (dbh *DbHandler) writeToDB(sqlStr string) error {
 		log.WithField("package", logPkg).Tracef(
 			"full query: %s\n", sqlStr)
 	}
+	err := dbh.execute(func() error {
+		_, err := dbh.DB.Exec(sqlStr)
+		if err != nil {
+			log.WithField("package", logPkg).Error(err)
+			return err
+		}
+		return nil
+	})
+	return err
+}
 
-	tx, err := dbh.DB.Begin()
-	if err != nil {
-		log.WithField("package", logPkg).Errorf("%v", err)
-		return err
+func (db *DbHandler) execute(operation func() error) error {
+	select {
+	case db.semaphore <- struct{}{}:
+		defer func() { <-db.semaphore }()
+		db.mutex.Lock()
+		defer db.mutex.Unlock()
+		return operation()
+	case <-time.After(db.timeout):
+		return errors.New("operation timed out waiting for semaphore")
 	}
-	stmt, err := tx.Prepare(sqlStr)
-	if err != nil {
-		log.WithField("package", logPkg).Errorf("Failed to prepare: %v", err)
-		return fmt.Errorf("Failed to prepare: %v", err)
-	}
-
-	_, err = stmt.Exec()
-	if err != nil {
-		log.WithField("package", logPkg).Errorf("Failed to execute: %v", err)
-		return err
-	}
-
-	err = tx.Commit()
-	if err != nil {
-		log.WithField("package", logPkg).Errorf("Failed to commit: %v", err)
-		return err
-	}
-
-	return nil
 }

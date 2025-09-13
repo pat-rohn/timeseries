@@ -11,8 +11,7 @@ import (
 )
 
 func TestDb(t *testing.T) {
-	log.SetLevel(log.InfoLevel)
-	rand.Seed(time.Now().UTC().UnixNano())
+	log.SetLevel(log.WarnLevel)
 	names := []string{"randFloat", "randFloat2Mix", "randInt", "randText"}
 	var timestamps []string
 	var randFloat []string
@@ -20,7 +19,7 @@ func TestDb(t *testing.T) {
 	var randInt []string
 	var randText []string
 	for i := 0; i < 10000; i++ {
-		timestamps = append(timestamps, fmt.Sprintf("%s", time.Now().Format("2006-01-02 15:04:05.000")))
+		timestamps = append(timestamps, time.Now().Format("2006-01-02 15:04:05.000"))
 		randomNmr := rand.Float32()*10000000.0 - 1000
 		randFloat = append(randFloat, fmt.Sprintf("%f", randomNmr))
 		randomNmr = rand.Float32()*0.0001 - 0.00005
@@ -46,9 +45,8 @@ func TestDb(t *testing.T) {
 	}
 
 	fmt.Printf("data:%+v", is)
-	dbh := NewDefault()
-
-	defer dbh.CloseDatabase()
+	dbh := DBHandler(GetDefaultDBConfig())
+	defer dbh.Close()
 	err := dbh.InsertIntoDatabase("randomtest", is)
 	if err != nil {
 		t.Fatalf("Failed to insert data:%v", err)
@@ -71,8 +69,8 @@ func TestDBStructs(t *testing.T) {
 		}
 		importRows = append(importRows, is)
 	}
-	dbh := NewDefault()
-	defer dbh.CloseDatabase()
+	dbh := DBHandler(GetDefaultDBConfig())
+	defer dbh.Close()
 	_, err := dbh.InsertRowsToTable("migrateTest", importRows)
 	if err != nil {
 		t.Fatalf("Failed to insert data:%v", err)

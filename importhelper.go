@@ -1,6 +1,8 @@
 package timeseries
 
-import "fmt"
+import (
+	"fmt"
+)
 
 // ImportStruct contains all data which are needed to add to a database.
 // One Timestamp can have multiple values
@@ -28,13 +30,13 @@ type ImportRowStruct struct {
 func CreateImportTable(importRows []ImportRowStruct) ImportStruct {
 	var timestamps []string
 	var data [][]string
-	for _ = range importRows[0].Names {
+	for range importRows[0].Names {
 		data = append(data, []string{})
 	}
 	for _, row := range importRows {
 		timestamps = append(timestamps, row.Timestamp)
 
-		for i, _ := range importRows[0].Names {
+		for i := range importRows[0].Names {
 			data[i] = append(data[i], row.Values[i])
 		}
 	}
