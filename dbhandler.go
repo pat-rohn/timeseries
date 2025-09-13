@@ -623,6 +623,39 @@ func (dbh *DbHandler) writeToDB(sqlStr string) error {
 	return err
 }
 
+func (db *DbHandler) ExecuteQuery(sqlStr string, args ...any) (*sql.Rows, error) {
+	logFields := log.Fields{"fnct": "executeQuery"}
+	log.WithFields(logFields).Infof("Execute query")
+
+	if len(sqlStr) > 2000 {
+		log.WithFields(logFields).Tracef(
+			"start from query: %s\n", sqlStr[0:500])
+		log.WithFields(logFields).Tracef(
+			"end from query: %v\n", sqlStr[len(sqlStr)-500:])
+	} else {
+		log.WithFields(logFields).Tracef(
+			"full query: %s\n", sqlStr)
+	}
+	var rows *sql.Rows
+	err := db.execute(func() error {
+		var err error
+		rows, err = db.DB.Query(sqlStr, args...)
+		if err != nil {
+			log.WithField("package", logPkg).Error(err)
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		log.WithField("package", logPkg).Error(err)
+		return nil, err
+	}
+
+	log.WithFields(logFields).Infof("Query executed")
+
+	return rows, nil
+}
+
 func (db *DbHandler) execute(operation func() error) error {
 	select {
 	case db.semaphore <- struct{}{}:
