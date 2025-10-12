@@ -619,6 +619,7 @@ func (dbh *DbHandler) writeToDB(sqlStr string) error {
 	return err
 }
 
+// Do not forget to close rows
 func (db *DbHandler) ExecuteQuery(sqlStr string, args ...any) (*sql.Rows, error) {
 	logFields := log.Fields{"fnct": "executeQuery"}
 	log.WithFields(logFields).Infof("Execute query")
@@ -650,6 +651,39 @@ func (db *DbHandler) ExecuteQuery(sqlStr string, args ...any) (*sql.Rows, error)
 	log.WithFields(logFields).Infof("Query executed")
 
 	return rows, nil
+}
+
+func (db *DbHandler) Execute(sqlStr string, args ...any) error {
+	logFields := log.Fields{"fnct": "executeQuery"}
+	log.WithFields(logFields).Infof("Execute query")
+
+	if len(sqlStr) > 2000 {
+		log.WithFields(logFields).Tracef(
+			"start from query: %s\n", sqlStr[0:500])
+		log.WithFields(logFields).Tracef(
+			"end from query: %v\n", sqlStr[len(sqlStr)-500:])
+	} else {
+		log.WithFields(logFields).Tracef(
+			"full query: %s\n", sqlStr)
+	}
+
+	err := db.execute(func() error {
+		var err error
+		_, err = db.DB.Exec(sqlStr, args...)
+		if err != nil {
+			log.WithField("package", logPkg).Error(err)
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		log.WithField("package", logPkg).Error(err)
+		return nil
+	}
+
+	log.WithFields(logFields).Infof("Query executed")
+
+	return nil
 }
 
 func (db *DbHandler) execute(operation func() error) error {
