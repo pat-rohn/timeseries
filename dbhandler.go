@@ -36,8 +36,7 @@ type DBConfig struct {
 type DbHandler struct {
 	conf      DBConfig
 	DB        *sql.DB
-	mutex     sync.Mutex
-	semaphore chan struct{} // limit number of concurrent operations
+	semaphore chan struct{} // serializes operations with timeout support
 	timeout   time.Duration
 }
 
@@ -47,14 +46,10 @@ var once sync.Once
 // Singleton for dbhandler
 func DBHandler(conf DBConfig) *DbHandler {
 	once.Do(func() {
-		if dbhandler != nil {
-			log.Fatalf("DbHandler already created with config: %+v", dbhandler.conf)
-		}
 		dbhandler = &DbHandler{
 			conf:      conf,
-			mutex:     sync.Mutex{},
 			timeout:   time.Second * 10,
-			semaphore: make(chan struct{}, 10),
+			semaphore: make(chan struct{}, 1),
 		}
 		if err := dbhandler.openDatabase(); err != nil {
 			log.WithField("package", logPkg).Fatalf(
@@ -62,6 +57,10 @@ func DBHandler(conf DBConfig) *DbHandler {
 		}
 		log.Infof("%+v", dbhandler.conf)
 	})
+	if dbhandler.conf != conf {
+		log.WithField("package", logPkg).Warnf(
+			"DBHandler already initialized with a different config; new config ignored")
+	}
 	return dbhandler
 }
 
@@ -111,6 +110,8 @@ func (dbh *DbHandler) openDatabase() error {
 
 func (dbh *DbHandler) Close() error {
 	err := dbh.DB.Close()
+	dbhandler = nil
+	once = sync.Once{}
 	log.WithField("package", logPkg).Infof("Closed database %s", dbh.conf.Name)
 	if err != nil {
 		log.WithField("package", logPkg).Warnf("Closing %s failed %v",
@@ -141,19 +142,27 @@ func (dbh *DbHandler) InsertIntoDatabase(tableName string, is ImportStruct) erro
 	str.WriteString("CREATE TABLE IF NOT EXISTS " + tableName + " (Timestamp " + timeStampStr + ", ")
 	columnsOfText := make(map[int]bool)
 	for columnNr, name := range is.Names {
-		temp := strings.TrimSpace(is.Data[columnNr][0])
-		_, errInt := strconv.ParseInt(temp, 0, 64)
-		_, errFloat := strconv.ParseFloat(temp, 64)
-		if errInt == nil || errFloat == nil || is.Data[columnNr][0] == "float" {
+		isNumeric := true
+		for _, val := range is.Data[columnNr] {
+			temp := strings.TrimSpace(val)
+			if temp == "float" {
+				continue
+			}
+			_, errInt := strconv.ParseInt(temp, 0, 64)
+			_, errFloat := strconv.ParseFloat(temp, 64)
+			if errInt != nil && errFloat != nil {
+				isNumeric = false
+				break
+			}
+		}
+		if isNumeric {
 			str.WriteString(name + " REAL DEFAULT NULL, ")
-			log.WithField("package", logPkg).Tracef(
-				"Is number: %v", is.Data[columnNr][0])
+			log.WithField("package", logPkg).Tracef("Is numeric column: %v", name)
 			columnsOfText[columnNr] = true
 		} else {
 			str.WriteString(name + " TEXT DEFAULT NULL, ")
+			log.WithField("package", logPkg).Tracef("Is text column: %v", name)
 			columnsOfText[columnNr] = false
-			log.WithField("package", logPkg).Tracef(
-				"Is no number: %v", is.Data[columnNr][0])
 		}
 	}
 
@@ -228,131 +237,132 @@ func (dbh *DbHandler) InsertIntoDatabase(tableName string, is ImportStruct) erro
 	return nil
 }
 
-// InsertRowsToTable imports importStructs into table and returns failed rows
-func (dbh *DbHandler) InsertRowsToTable(tableName string, importStructs []ImportRowStruct) ([]ImportRowStruct, error) {
-	logFields := log.Fields{"package": logPkg, "func": "InsertRowsToTable"}
-	var failedImports []ImportRowStruct
-
-	for _, is := range importStructs {
-		retryCounter := 3
-		for retryCounter > 0 {
-			retryCounter--
-			err := dbh.InsertRowToTable(tableName, is)
-			if err != nil {
-				log.WithFields(logFields).Errorf("Failed to import row: %v", err)
-				time.Sleep(time.Millisecond * 500)
-			} else {
-				log.WithFields(logFields).Traceln("succesfully imported row")
-				break
-			}
-			if retryCounter == 0 {
-				log.WithFields(logFields).Errorln("Unsuccesful rows. ")
-				failedImports = append(failedImports, is)
-			}
-		}
-	}
-	if len(failedImports) > 0 {
-		log.WithFields(logFields).Errorf("Failed to imports: %v", len(failedImports))
-		return failedImports, fmt.Errorf("failed to imports: %v", len(failedImports))
-	}
-	return failedImports, nil
-}
-
-// InsertRowToTable inserts one row into database
-func (dbh *DbHandler) InsertRowToTable(tableName string, is ImportRowStruct) error {
-
+// buildTableAndColumnTypes builds a CREATE TABLE IF NOT EXISTS statement for the
+// given table and returns it together with a map of column index -> column type
+// constant (columnFloatType / columnTextType).
+func (dbh *DbHandler) buildTableAndColumnTypes(tableName string, names []string, values []string) (string, map[int]int) {
 	var str strings.Builder
-	log.WithField("package", logPkg).Tracef(
-		"Columns: %v", is.Names)
-	log.WithField("package", logPkg).Tracef(
-		"Columns: %v", len(is.Names))
-	log.WithField("package", logPkg).Tracef(
-		"Entries: %v", len(is.Values))
 	timeStampStr := "DATETIME"
 	if dbh.conf.UsePostgres {
 		timeStampStr = "TIMESTAMP"
 	}
 	str.WriteString("CREATE TABLE IF NOT EXISTS " + tableName + " (Timestamp " + timeStampStr + ", ")
-	columnsOfText := make(map[int]int)
-	for columnNr, name := range is.Names {
-		temp := strings.TrimSpace(is.Values[columnNr])
+	colTypes := make(map[int]int)
+	for columnNr, name := range names {
+		temp := strings.TrimSpace(values[columnNr])
 		_, errInt := strconv.ParseInt(temp, 0, 64)
 		_, errFloat := strconv.ParseFloat(temp, 64)
-		if errInt == nil || errFloat == nil || is.Values[columnNr] == "float" {
+		if errInt == nil || errFloat == nil || values[columnNr] == "float" {
 			str.WriteString(name + " REAL DEFAULT NULL, ")
-			columnsOfText[columnNr] = columnFloatType
+			colTypes[columnNr] = columnFloatType
 		} else {
 			str.WriteString(name + " TEXT DEFAULT NULL, ")
-			columnsOfText[columnNr] = columnTextType
-			log.WithField("package", logPkg).Tracef(
-				"Is no number: %v", is.Values[columnNr])
+			colTypes[columnNr] = columnTextType
 		}
 	}
-
 	sqlStr := str.String()[0 : len(str.String())-2]
 	sqlStr += ", Fetched INTEGER DEFAULT 0);"
-	log.WithField("package", logPkg).Tracef("create query: %s", sqlStr)
+	return sqlStr, colTypes
+}
 
-	err := dbh.execute(func() error {
-		_, err := dbh.DB.Exec(sqlStr)
-		if err != nil {
-			log.WithField("package", logPkg).Errorf("Failed to create db %v", err)
-			return fmt.Errorf("failed to execute sql string: %v", err)
-		}
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-
-	str.Reset()
+// buildInsertRowSQL builds a single-row INSERT statement using the column type
+// map returned by buildTableAndColumnTypes.
+func buildInsertRowSQL(tableName string, is ImportRowStruct, colTypes map[int]int) string {
+	var str strings.Builder
 	str.WriteString("INSERT INTO " + tableName + " (Timestamp, ")
-	isFirst := true
-	for _, name := range is.Names {
-		if isFirst {
-			isFirst = false
+	for i, name := range is.Names {
+		if i == 0 {
 			str.WriteString(name)
 		} else {
 			str.WriteString(", " + name)
 		}
-
 	}
-	str.WriteString(") VALUES \n")
-
-	str.WriteString("('" + is.Timestamp + "', ")
-	isFirst = true
+	str.WriteString(") VALUES ('" + is.Timestamp + "', ")
 	for dataIndex := range is.Names {
 		val := strings.TrimSpace(is.Values[dataIndex])
-		if columnsOfText[dataIndex] == columnFloatType || columnsOfText[dataIndex] == columnIntegerType {
+		if colTypes[dataIndex] == columnFloatType || colTypes[dataIndex] == columnIntegerType {
 			_, errFloat := strconv.ParseFloat(val, 64)
 			_, errInt := strconv.ParseInt(val, 0, 64)
 			if errFloat != nil && errInt != nil {
-				// we hope the db doesn't mind and accepts float for int and vice versa
 				log.WithField("package", logPkg).Warnf(
 					"Skip number because parsing failed: %s", errFloat)
 				val = "null"
-
 			}
 		}
-		if columnsOfText[dataIndex] == columnTextType {
+		if colTypes[dataIndex] == columnTextType {
 			val = "'" + val + "'"
 		}
-		if isFirst {
+		if dataIndex == 0 {
 			str.WriteString(val)
-			isFirst = false
-
 		} else {
 			str.WriteString(", " + val)
 		}
 	}
-	str.WriteString("),\n")
+	str.WriteString(")")
+	return str.String()
+}
+
+// InsertRowsToTable imports all rows into the table inside a single transaction.
+// The table schema is inferred from the first row. On any failure the entire
+// batch is rolled back and all rows are returned as failed.
+func (dbh *DbHandler) InsertRowsToTable(tableName string, importStructs []ImportRowStruct) ([]ImportRowStruct, error) {
+	logFields := log.Fields{"package": logPkg, "func": "InsertRowsToTable"}
+	if len(importStructs) == 0 {
+		return nil, nil
+	}
+
+	// Ensure the table exists (idempotent DDL, done outside the transaction).
+	createSQL, colTypes := dbh.buildTableAndColumnTypes(tableName, importStructs[0].Names, importStructs[0].Values)
+	log.WithFields(logFields).Tracef("create query: %s", createSQL)
+	if err := dbh.execute(func() error {
+		_, err := dbh.DB.Exec(createSQL)
+		return err
+	}); err != nil {
+		log.WithFields(logFields).Errorf("Failed to create table: %v", err)
+		return importStructs, fmt.Errorf("failed to create table: %v", err)
+	}
+
+	// Insert all rows atomically.
+	err := dbh.executeTransaction(func(tx *sql.Tx) error {
+		for _, is := range importStructs {
+			insertSQL := buildInsertRowSQL(tableName, is, colTypes)
+			if _, err := tx.Exec(insertSQL); err != nil {
+				log.WithFields(logFields).Errorf("Failed to import row: %v", err)
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		log.WithFields(logFields).Errorf("Transaction failed, all %d rows rolled back: %v", len(importStructs), err)
+		return importStructs, fmt.Errorf("transaction failed, all rows rolled back: %v", err)
+	}
+	log.WithFields(logFields).Tracef("Successfully imported %d rows", len(importStructs))
+	return nil, nil
+}
+
+// InsertRowToTable inserts one row into database
+func (dbh *DbHandler) InsertRowToTable(tableName string, is ImportRowStruct) error {
+	log.WithField("package", logPkg).Tracef("Columns: %v (%d), Values: %d",
+		is.Names, len(is.Names), len(is.Values))
+
+	createSQL, colTypes := dbh.buildTableAndColumnTypes(tableName, is.Names, is.Values)
+	log.WithField("package", logPkg).Tracef("create query: %s", createSQL)
+	if err := dbh.execute(func() error {
+		_, err := dbh.DB.Exec(createSQL)
+		if err != nil {
+			log.WithField("package", logPkg).Errorf("Failed to create table: %v", err)
+			return fmt.Errorf("failed to create table: %v", err)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	insertSQL := buildInsertRowSQL(tableName, is, colTypes)
 	log.WithField("package", logPkg).Traceln("Finished creating string")
-	sqlStr = str.String()
-
-	sqlStr = sqlStr[0 : len(sqlStr)-2]
-
-	if err := dbh.writeToDB(sqlStr); err != nil {
-		log.WithField("package", logPkg).Errorf("Failed to execute sql-statement: %v\n", err)
+	if err := dbh.writeToDB(insertSQL); err != nil {
+		log.WithField("package", logPkg).Errorf("Failed to execute sql-statement: %v", err)
 		return fmt.Errorf("failed to execute sql-statement: %v", err)
 	}
 	return nil
@@ -539,62 +549,57 @@ func (dbh *DbHandler) CreateTimeseriesTable(tableName string) error {
 }
 
 // InsertTimeseries stores values into timeseries table
-func (dbh *DbHandler) InsertTimeseries(is TimeseriesImportStruct, onClonflictDoNothing bool, table string) error {
-	var str strings.Builder
-	log.WithField("package", logPkg).Tracef(
-		"Entries: %v", is.Values)
-	log.WithField("package", logPkg).Infof(
-		"Tag: %v", is.Tag)
-	str.Reset()
+func (dbh *DbHandler) InsertTimeseries(is TimeseriesImportStruct, onConflictDoNothing bool, table string) error {
+	log.WithField("package", logPkg).Tracef("Entries: %v", is.Values)
+	log.WithField("package", logPkg).Infof("Tag: %v", is.Tag)
 
-	str.WriteString("INSERT INTO " + table + " (time, tag, value)")
-	log.WithField("package", logPkg).Infof("Insert string: %v", str.String())
-	str.WriteString(" VALUES \n")
+	// Build all INSERT chunks up front so they can be committed atomically.
+	var chunks []string
+	var str strings.Builder
+	str.WriteString("INSERT INTO " + table + " (time, tag, value) VALUES \n")
 
 	for entryIndex, ts := range is.Timestamps {
 		str.WriteString("('" + ts + "', '" + is.Tag + "',")
-
 		val := strings.TrimSpace(is.Values[entryIndex])
 		_, errFloat := strconv.ParseFloat(val, 64)
 		_, errInt := strconv.ParseInt(val, 0, 64)
 		if errFloat != nil && errInt != nil {
-			// it can be float or integer, db-type is set to real
 			log.WithField("package", logPkg).Infof(
 				"Skip number in %s because parsing failed: %s", is.Values[entryIndex], errFloat)
-			val = "null" // this can be imported in column of type real
-
+			val = "null"
 		}
 		str.WriteString(val + "),\n")
+
 		if entryIndex%100000 == 0 && entryIndex != 0 {
-			sqlStr := str.String()
-			sqlStr = sqlStr[0 : len(sqlStr)-2]
-			if onClonflictDoNothing {
-				sqlStr += " on conflict do nothing"
+			chunk := str.String()
+			chunk = chunk[0 : len(chunk)-2]
+			if onConflictDoNothing {
+				chunk += " on conflict do nothing"
 			}
-			err := dbh.writeToDB(sqlStr)
-			if err != nil {
-				log.WithField("package", logPkg).Errorf("%v", err)
-				return err
-			}
+			chunks = append(chunks, chunk)
 			str.Reset()
-			str.WriteString("INSERT INTO " + table + " (time, tag, value)")
-			log.WithField("package", logPkg).Infof("Insert string: %v", str.String())
-			str.WriteString(" VALUES \n")
+			str.WriteString("INSERT INTO " + table + " (time, tag, value) VALUES \n")
 		}
 	}
 	log.WithField("package", logPkg).Traceln("Finished creating string")
-	sqlStr := str.String()
-	sqlStr = sqlStr[0 : len(sqlStr)-2]
-	if onClonflictDoNothing {
-		sqlStr += " on conflict  do nothing"
+	chunk := str.String()
+	chunk = chunk[0 : len(chunk)-2]
+	if onConflictDoNothing {
+		chunk += " on conflict do nothing"
 	}
-	err := dbh.writeToDB(sqlStr)
-	if err != nil {
-		log.WithField("package", logPkg).Errorf("%v", err)
-		return err
-	}
+	chunks = append(chunks, chunk)
 
-	return nil
+	// Execute all chunks inside a single transaction so the whole import is
+	// atomic: a failure on any chunk rolls back everything written so far.
+	return dbh.executeTransaction(func(tx *sql.Tx) error {
+		for _, c := range chunks {
+			if _, err := tx.Exec(c); err != nil {
+				log.WithField("package", logPkg).Errorf("%v", err)
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func (dbh *DbHandler) writeToDB(sqlStr string) error {
@@ -690,9 +695,29 @@ func (db *DbHandler) execute(operation func() error) error {
 	select {
 	case db.semaphore <- struct{}{}:
 		defer func() { <-db.semaphore }()
-		db.mutex.Lock()
-		defer db.mutex.Unlock()
 		return operation()
+	case <-time.After(db.timeout):
+		return errors.New("operation timed out waiting for semaphore")
+	}
+}
+
+// executeTransaction runs all operations inside a single DB transaction.
+// If any operation returns an error the transaction is rolled back.
+func (db *DbHandler) executeTransaction(operations func(*sql.Tx) error) error {
+	select {
+	case db.semaphore <- struct{}{}:
+		defer func() { <-db.semaphore }()
+		tx, err := db.DB.Begin()
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction: %w", err)
+		}
+		if err := operations(tx); err != nil {
+			if rbErr := tx.Rollback(); rbErr != nil {
+				return fmt.Errorf("operation failed: %v; rollback also failed: %v", err, rbErr)
+			}
+			return err
+		}
+		return tx.Commit()
 	case <-time.After(db.timeout):
 		return errors.New("operation timed out waiting for semaphore")
 	}
