@@ -113,7 +113,7 @@ func (dbh *DbHandler) Close() error {
 	err := dbh.DB.Close()
 	log.WithField("package", logPkg).Infof("Closed database %s", dbh.conf.Name)
 	if err != nil {
-		log.WithField("package", logPkg).Warnf("Closing %s failed %f",
+		log.WithField("package", logPkg).Warnf("Closing %s failed %v",
 			dbh.conf.Name, err)
 		return err
 	}
@@ -294,7 +294,7 @@ func (dbh *DbHandler) InsertRowToTable(tableName string, is ImportRowStruct) err
 	log.WithField("package", logPkg).Tracef("create query: %s", sqlStr)
 
 	err := dbh.execute(func() error {
-		_, err := dbh.DB.Query(sqlStr)
+		_, err := dbh.DB.Exec(sqlStr)
 		if err != nil {
 			log.WithField("package", logPkg).Errorf("Failed to create db %v", err)
 			return fmt.Errorf("failed to execute sql string: %v", err)
@@ -470,7 +470,7 @@ func (dbh *DbHandler) SetFetched(firstTimestamp string, lastTimestamp string) er
 
 	statement := "UPDATE sensor_data SET Fetched=? WHERE Timestamp<=? AND Timestamp>=?"
 	err := dbh.execute(func() error {
-		res, err := dbh.DB.Exec(statement)
+		res, err := dbh.DB.Exec(statement, 1, lastTimestamp, firstTimestamp)
 		if err != nil {
 			log.WithFields(logFields).Errorf("Failed to get affected rows ... :  %v, %v", err, statement)
 			return err
@@ -577,7 +577,7 @@ func (dbh *DbHandler) InsertTimeseries(is TimeseriesImportStruct, onClonflictDoN
 				return err
 			}
 			str.Reset()
-			str.WriteString("INSERT INTO measurements (time, tag, value)")
+			str.WriteString("INSERT INTO " + table + " (time, tag, value)")
 			log.WithField("package", logPkg).Infof("Insert string: %v", str.String())
 			str.WriteString(" VALUES \n")
 		}
@@ -678,7 +678,7 @@ func (db *DbHandler) Execute(sqlStr string, args ...any) error {
 	})
 	if err != nil {
 		log.WithField("package", logPkg).Error(err)
-		return nil
+		return err
 	}
 
 	log.WithFields(logFields).Infof("Query executed")
