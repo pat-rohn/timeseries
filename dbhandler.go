@@ -41,11 +41,13 @@ type DbHandler struct {
 }
 
 var dbhandler *DbHandler
-var once sync.Once
+var dbMu sync.Mutex
 
 // Singleton for dbhandler
 func DBHandler(conf DBConfig) *DbHandler {
-	once.Do(func() {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+	if dbhandler == nil {
 		dbhandler = &DbHandler{
 			conf:      conf,
 			timeout:   time.Second * 10,
@@ -56,7 +58,7 @@ func DBHandler(conf DBConfig) *DbHandler {
 				"Failed to create database: %v", err)
 		}
 		log.Infof("%+v", dbhandler.conf)
-	})
+	}
 	if dbhandler.conf != conf {
 		log.WithField("package", logPkg).Warnf(
 			"DBHandler already initialized with a different config; new config ignored")
@@ -87,7 +89,7 @@ func (dbh *DbHandler) openDatabase() error {
 			log.WithFields(logFields).Tracef("Create Folder: %v", dbh.conf.IPOrPath)
 			if _, err := os.Stat(dbh.conf.IPOrPath); err != nil {
 				if os.IsNotExist(err) {
-					err := os.MkdirAll(dbh.conf.IPOrPath, 0644)
+					err := os.MkdirAll(dbh.conf.IPOrPath, 0755)
 					if err != nil {
 						log.WithFields(logFields).Errorf("Failed to create path %v", err)
 					}
@@ -110,8 +112,9 @@ func (dbh *DbHandler) openDatabase() error {
 
 func (dbh *DbHandler) Close() error {
 	err := dbh.DB.Close()
+	dbMu.Lock()
 	dbhandler = nil
-	once = sync.Once{}
+	dbMu.Unlock()
 	log.WithField("package", logPkg).Infof("Closed database %s", dbh.conf.Name)
 	if err != nil {
 		log.WithField("package", logPkg).Warnf("Closing %s failed %v",
@@ -213,7 +216,7 @@ func (dbh *DbHandler) InsertIntoDatabase(tableName string, is ImportStruct) erro
 				}
 			}
 			if !columnsOfText[dataIndex] {
-				val = "'" + val + "'"
+				val = "'" + strings.ReplaceAll(val, "'", "''") + "'"
 			}
 			if isFirst {
 				str.WriteString(val)
@@ -290,7 +293,7 @@ func buildInsertRowSQL(tableName string, is ImportRowStruct, colTypes map[int]in
 			}
 		}
 		if colTypes[dataIndex] == columnTextType {
-			val = "'" + val + "'"
+			val = "'" + strings.ReplaceAll(val, "'", "''") + "'"
 		}
 		if dataIndex == 0 {
 			str.WriteString(val)
@@ -303,7 +306,7 @@ func buildInsertRowSQL(tableName string, is ImportRowStruct, colTypes map[int]in
 }
 
 // InsertRowsToTable imports all rows into the table inside a single transaction.
-// The table schema is inferred from the first row. On any failure the entire
+// The table schema is inferred by scanning all rows. On any failure the entire
 // batch is rolled back and all rows are returned as failed.
 func (dbh *DbHandler) InsertRowsToTable(tableName string, importStructs []ImportRowStruct) ([]ImportRowStruct, error) {
 	logFields := log.Fields{"package": logPkg, "func": "InsertRowsToTable"}
@@ -312,7 +315,33 @@ func (dbh *DbHandler) InsertRowsToTable(tableName string, importStructs []Import
 	}
 
 	// Ensure the table exists (idempotent DDL, done outside the transaction).
-	createSQL, colTypes := dbh.buildTableAndColumnTypes(tableName, importStructs[0].Names, importStructs[0].Values)
+	// Determine column types by scanning every row so that a column is only
+	// declared REAL when ALL of its values are numeric.
+	allNumeric := make([]bool, len(importStructs[0].Names))
+	for i := range allNumeric {
+		allNumeric[i] = true
+	}
+	for _, row := range importStructs {
+		for i, val := range row.Values {
+			if allNumeric[i] {
+				temp := strings.TrimSpace(val)
+				_, errInt := strconv.ParseInt(temp, 0, 64)
+				_, errFloat := strconv.ParseFloat(temp, 64)
+				if errInt != nil && errFloat != nil {
+					allNumeric[i] = false
+				}
+			}
+		}
+	}
+	typeHints := make([]string, len(importStructs[0].Names))
+	for i, isNum := range allNumeric {
+		if isNum {
+			typeHints[i] = "0" // numeric sentinel → REAL column
+		} else {
+			typeHints[i] = "text" // non-numeric sentinel → TEXT column
+		}
+	}
+	createSQL, colTypes := dbh.buildTableAndColumnTypes(tableName, importStructs[0].Names, typeHints)
 	log.WithFields(logFields).Tracef("create query: %s", createSQL)
 	if err := dbh.execute(func() error {
 		_, err := dbh.DB.Exec(createSQL)
@@ -377,8 +406,10 @@ func (dbh *DbHandler) ReadTPH() ImportStruct {
 
 	rows, err := dbh.DB.Query(sqlstr)
 	if err != nil {
-		log.Fatal(err)
+		log.WithFields(logFields).Errorf("Failed to query db: %v", err)
+		return ImportStruct{}
 	}
+	defer rows.Close()
 
 	var timestamps []string
 	var Temperatures []string
@@ -409,7 +440,6 @@ func (dbh *DbHandler) ReadTPH() ImportStruct {
 	data = append(data, Temperatures)
 	data = append(data, Pressures)
 	data = append(data, Humiditys)
-	rows.Close()
 
 	return ImportStruct{
 		Names:      names,
@@ -466,7 +496,6 @@ func (dbh *DbHandler) ReadAllTPH() ImportStruct {
 	data = append(data, Temperatures)
 	data = append(data, Pressures)
 	data = append(data, Humiditys)
-	rows.Close()
 
 	return ImportStruct{
 		Names:      names,
@@ -478,7 +507,12 @@ func (dbh *DbHandler) ReadAllTPH() ImportStruct {
 func (dbh *DbHandler) SetFetched(firstTimestamp string, lastTimestamp string) error {
 	logFields := log.Fields{"package": logPkg, "fnct": "SetFetched"}
 
-	statement := "UPDATE sensor_data SET Fetched=? WHERE Timestamp<=? AND Timestamp>=?"
+	var statement string
+	if dbh.conf.UsePostgres {
+		statement = "UPDATE sensor_data SET Fetched=$1 WHERE Timestamp<=$2 AND Timestamp>=$3"
+	} else {
+		statement = "UPDATE sensor_data SET Fetched=? WHERE Timestamp<=? AND Timestamp>=?"
+	}
 	err := dbh.execute(func() error {
 		res, err := dbh.DB.Exec(statement, 1, lastTimestamp, firstTimestamp)
 		if err != nil {
@@ -553,10 +587,21 @@ func (dbh *DbHandler) InsertTimeseries(is TimeseriesImportStruct, onConflictDoNo
 	log.WithField("package", logPkg).Tracef("Entries: %v", is.Values)
 	log.WithField("package", logPkg).Infof("Tag: %v", is.Tag)
 
+	if len(is.Timestamps) == 0 {
+		return nil
+	}
+
 	// Build all INSERT chunks up front so they can be committed atomically.
 	var chunks []string
+	includeComment := len(is.Comments) > 0
+	var insertHeader string
+	if includeComment {
+		insertHeader = "INSERT INTO " + table + " (time, tag, value, comment) VALUES \n"
+	} else {
+		insertHeader = "INSERT INTO " + table + " (time, tag, value) VALUES \n"
+	}
 	var str strings.Builder
-	str.WriteString("INSERT INTO " + table + " (time, tag, value) VALUES \n")
+	str.WriteString(insertHeader)
 
 	for entryIndex, ts := range is.Timestamps {
 		str.WriteString("('" + ts + "', '" + is.Tag + "',")
@@ -568,7 +613,15 @@ func (dbh *DbHandler) InsertTimeseries(is TimeseriesImportStruct, onConflictDoNo
 				"Skip number in %s because parsing failed: %s", is.Values[entryIndex], errFloat)
 			val = "null"
 		}
-		str.WriteString(val + "),\n")
+		comment := ""
+		if includeComment && entryIndex < len(is.Comments) {
+			comment = strings.ReplaceAll(is.Comments[entryIndex], "'", "''")
+		}
+		if includeComment {
+			str.WriteString(val + ", '" + comment + "'),\n")
+		} else {
+			str.WriteString(val + "),\n")
+		}
 
 		if entryIndex%100000 == 0 && entryIndex != 0 {
 			chunk := str.String()
@@ -578,16 +631,27 @@ func (dbh *DbHandler) InsertTimeseries(is TimeseriesImportStruct, onConflictDoNo
 			}
 			chunks = append(chunks, chunk)
 			str.Reset()
-			str.WriteString("INSERT INTO " + table + " (time, tag, value) VALUES \n")
+			str.WriteString(insertHeader)
 		}
 	}
 	log.WithField("package", logPkg).Traceln("Finished creating string")
-	chunk := str.String()
-	chunk = chunk[0 : len(chunk)-2]
-	if onConflictDoNothing {
-		chunk += " on conflict do nothing"
+	// Only flush the last partial chunk if it actually contains row data.
+	// When a chunk-boundary flush happened on the very last iteration, str
+	// was reset to just the INSERT header and there is nothing left to append.
+	if str.Len() > 0 {
+		// The header alone ends with "VALUES \n" (8+ chars); a real chunk has
+		// at least one row appended after the header. We detect "header only"
+		// by checking whether str still ends with exactly "VALUES \n".
+		raw := str.String()
+		const valueSuffix = "VALUES \n"
+		if !strings.HasSuffix(raw, valueSuffix) {
+			chunk := raw[0 : len(raw)-2]
+			if onConflictDoNothing {
+				chunk += " on conflict do nothing"
+			}
+			chunks = append(chunks, chunk)
+		}
 	}
-	chunks = append(chunks, chunk)
 
 	// Execute all chunks inside a single transaction so the whole import is
 	// atomic: a failure on any chunk rolls back everything written so far.

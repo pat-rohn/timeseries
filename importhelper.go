@@ -28,6 +28,9 @@ type ImportRowStruct struct {
 }
 
 func CreateImportTable(importRows []ImportRowStruct) ImportStruct {
+	if len(importRows) == 0 {
+		return ImportStruct{}
+	}
 	var timestamps []string
 	var data [][]string
 	for range importRows[0].Names {
