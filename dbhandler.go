@@ -102,6 +102,17 @@ func (dbh *DbHandler) openDatabase() error {
 			log.WithFields(logFields).Errorf("Failed to open db %v", err)
 			return fmt.Errorf("failed to open db %v", err)
 		}
+		// Enable WAL (Write-Ahead Logging) so that readers (open *sql.Rows)
+		// and writers can proceed concurrently without triggering SQLITE_BUSY.
+		// WAL is the recommended SQLite journal mode for concurrent workloads.
+		if _, err := database.Exec("PRAGMA journal_mode=WAL"); err != nil {
+			log.WithFields(logFields).Warnf("failed to enable WAL mode: %v", err)
+		}
+		// Set a generous busy-timeout as a safety net for any remaining
+		// write-write contention (the app-level semaphore handles most of it).
+		if _, err := database.Exec("PRAGMA busy_timeout=10000"); err != nil {
+			log.WithFields(logFields).Warnf("failed to set busy_timeout: %v", err)
+		}
 		dbh.DB = database
 	}
 	log.WithFields(logFields).Infof("Opened database with name %s ",
@@ -111,6 +122,12 @@ func (dbh *DbHandler) openDatabase() error {
 }
 
 func (dbh *DbHandler) Close() error {
+	// Switch back to DELETE journal mode before closing.  This performs a
+	// full WAL checkpoint and causes SQLite to delete the -wal/-shm files,
+	// leaving no stale sidecar files on disk.
+	if _, err := dbh.DB.Exec("PRAGMA journal_mode=DELETE"); err != nil {
+		log.WithField("package", logPkg).Warnf("failed to revert journal mode on close: %v", err)
+	}
 	err := dbh.DB.Close()
 	dbMu.Lock()
 	dbhandler = nil
