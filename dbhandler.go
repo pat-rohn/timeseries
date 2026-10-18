@@ -96,7 +96,10 @@ func (dbh *DbHandler) openDatabase() error {
 			}
 		}
 
-		database, err := sql.Open("sqlite", dbh.conf.IPOrPath+dbh.conf.Name)
+		database, err := sql.Open("sqlite", dbh.conf.IPOrPath+dbh.conf.Name+
+			// Pragmas in the DSN apply to every pooled connection; SQLite has a single
+			// writer, so wait on locks instead of failing with SQLITE_BUSY.
+			"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 		if err != nil {
 			log.WithFields(logFields).Errorf("Failed to open db %v", err)
 			return fmt.Errorf("failed to open db %v", err)
