@@ -725,11 +725,10 @@ func (db *DbHandler) Execute(sqlStr string, args ...any) error {
 		return nil
 	})
 	if err != nil {
-		log.WithField("package", logPkg).Error(err)
-		return nil
+		return err
 	}
 
-	log.WithFields(logFields).Infof("Query executed")
+	log.WithFields(logFields).Tracef("Query executed")
 
 	return nil
 }
