@@ -43,26 +43,27 @@ type DbHandler struct {
 }
 
 var dbhandler *DbHandler
-var once sync.Once
+var singletonMu sync.Mutex
 
-// Singleton for dbhandler
+// DBHandler returns the process-wide handler, opening it on first use and
+// again after Close.
 func DBHandler(conf DBConfig) *DbHandler {
-	once.Do(func() {
-		if dbhandler != nil {
-			log.Fatalf("DbHandler already created with config: %+v", dbhandler.conf)
-		}
-		dbhandler = &DbHandler{
+	singletonMu.Lock()
+	defer singletonMu.Unlock()
+	if dbhandler == nil {
+		dbh := &DbHandler{
 			conf:      conf,
 			mutex:     sync.Mutex{},
 			timeout:   time.Second * 10,
 			semaphore: make(chan struct{}, 10),
 		}
-		if err := dbhandler.openDatabase(); err != nil {
+		if err := dbh.openDatabase(); err != nil {
 			log.WithField("package", logPkg).Fatalf(
 				"Failed to create database: %v", err)
 		}
-		log.Infof("%+v", dbhandler.conf)
-	})
+		log.Infof("%+v", dbh.conf)
+		dbhandler = dbh
+	}
 	return dbhandler
 }
 
@@ -114,6 +115,11 @@ func (dbh *DbHandler) openDatabase() error {
 }
 
 func (dbh *DbHandler) Close() error {
+	singletonMu.Lock()
+	if dbhandler == dbh {
+		dbhandler = nil
+	}
+	singletonMu.Unlock()
 	err := dbh.DB.Close()
 	log.WithField("package", logPkg).Infof("Closed database %s", dbh.conf.Name)
 	if err != nil {
