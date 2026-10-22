@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -541,63 +542,101 @@ func (dbh *DbHandler) CreateTimeseriesTable(tableName string) error {
 	return dbh.writeToDB(sqlStr)
 }
 
-// InsertTimeseries stores values into timeseries table
-func (dbh *DbHandler) InsertTimeseries(is TimeseriesImportStruct, onClonflictDoNothing bool, table string) error {
-	var str strings.Builder
-	log.WithField("package", logPkg).Tracef(
-		"Entries: %v", is.Values)
-	log.WithField("package", logPkg).Infof(
-		"Tag: %v", is.Tag)
-	str.Reset()
+// insertTimeseriesBatchRows bounds the rows per INSERT statement; 3 bind
+// parameters per row stays far below SQLite's and Postgres' parameter limits.
+const insertTimeseriesBatchRows = 500
 
-	str.WriteString("INSERT INTO " + table + " (time, tag, value)")
-	log.WithField("package", logPkg).Infof("Insert string: %v", str.String())
-	str.WriteString(" VALUES \n")
+var tableNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
-	for entryIndex, ts := range is.Timestamps {
-		str.WriteString("('" + ts + "', '" + is.Tag + "',")
+// timestampLayouts are the accepted timestamp formats: RFC3339 (firmware sends
+// "2006-01-02T15:04:05.000Z") and the SQL style "2006-01-02 15:04:05[.000]".
+var timestampLayouts = []string{
+	time.RFC3339Nano,
+	"2006-01-02 15:04:05.999999999",
+}
 
-		val := strings.TrimSpace(is.Values[entryIndex])
-		_, errFloat := strconv.ParseFloat(val, 64)
-		_, errInt := strconv.ParseInt(val, 0, 64)
-		if errFloat != nil && errInt != nil {
-			// it can be float or integer, db-type is set to real
-			log.WithField("package", logPkg).Infof(
-				"Skip number in %s because parsing failed: %s", is.Values[entryIndex], errFloat)
-			val = "null" // this can be imported in column of type real
-
+func validTimestamp(ts string) bool {
+	for _, layout := range timestampLayouts {
+		if _, err := time.Parse(layout, ts); err == nil {
+			return true
 		}
-		str.WriteString(val + "),\n")
-		if entryIndex%100000 == 0 && entryIndex != 0 {
-			sqlStr := str.String()
-			sqlStr = sqlStr[0 : len(sqlStr)-2]
-			if onClonflictDoNothing {
-				sqlStr += " on conflict do nothing"
+	}
+	return false
+}
+
+// parseTimeseriesValue returns the value as float64, or nil (SQL NULL) when it
+// is not a number.
+func parseTimeseriesValue(raw string) any {
+	val := strings.TrimSpace(raw)
+	if f, err := strconv.ParseFloat(val, 64); err == nil {
+		return f
+	}
+	if i, err := strconv.ParseInt(val, 0, 64); err == nil {
+		return float64(i)
+	}
+	log.WithField("package", logPkg).Debugf("Store null for %q: not a number", raw)
+	return nil
+}
+
+// InsertTimeseries stores values into the timeseries table. Tag, timestamps and
+// values are bound as parameters; timestamps must be RFC3339 or
+// "YYYY-MM-DD HH:MM:SS[.fff]" and are stored as sent. All rows are written in
+// one transaction.
+func (dbh *DbHandler) InsertTimeseries(is TimeseriesImportStruct, onClonflictDoNothing bool, table string) error {
+	if !tableNamePattern.MatchString(table) {
+		return fmt.Errorf("invalid table name %q", table)
+	}
+	if len(is.Timestamps) != len(is.Values) {
+		return fmt.Errorf("tag %q: %d timestamps but %d values", is.Tag, len(is.Timestamps), len(is.Values))
+	}
+	for _, ts := range is.Timestamps {
+		if !validTimestamp(ts) {
+			return fmt.Errorf("tag %q: invalid timestamp %q", is.Tag, ts)
+		}
+	}
+	log.WithField("package", logPkg).Tracef("Insert %d entries for tag %v", len(is.Values), is.Tag)
+
+	return dbh.execute(func() error {
+		tx, err := dbh.DB.Begin()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		for start := 0; start < len(is.Timestamps); start += insertTimeseriesBatchRows {
+			end := start + insertTimeseriesBatchRows
+			if end > len(is.Timestamps) {
+				end = len(is.Timestamps)
 			}
-			err := dbh.writeToDB(sqlStr)
-			if err != nil {
+			sqlStr, args := dbh.timeseriesInsertStatement(table, is, start, end, onClonflictDoNothing)
+			if _, err := tx.Exec(sqlStr, args...); err != nil {
 				log.WithField("package", logPkg).Errorf("%v", err)
 				return err
 			}
-			str.Reset()
-			str.WriteString("INSERT INTO measurements (time, tag, value)")
-			log.WithField("package", logPkg).Infof("Insert string: %v", str.String())
-			str.WriteString(" VALUES \n")
 		}
-	}
-	log.WithField("package", logPkg).Traceln("Finished creating string")
-	sqlStr := str.String()
-	sqlStr = sqlStr[0 : len(sqlStr)-2]
-	if onClonflictDoNothing {
-		sqlStr += " on conflict  do nothing"
-	}
-	err := dbh.writeToDB(sqlStr)
-	if err != nil {
-		log.WithField("package", logPkg).Errorf("%v", err)
-		return err
-	}
+		return tx.Commit()
+	})
+}
 
-	return nil
+func (dbh *DbHandler) timeseriesInsertStatement(table string, is TimeseriesImportStruct, start, end int, onConflictDoNothing bool) (string, []any) {
+	var str strings.Builder
+	args := make([]any, 0, 3*(end-start))
+	str.WriteString("INSERT INTO " + table + " (time, tag, value) VALUES ")
+	for i := start; i < end; i++ {
+		if i > start {
+			str.WriteString(", ")
+		}
+		if dbh.conf.UsePostgres {
+			n := len(args)
+			fmt.Fprintf(&str, "($%d, $%d, $%d)", n+1, n+2, n+3)
+		} else {
+			str.WriteString("(?, ?, ?)")
+		}
+		args = append(args, is.Timestamps[i], is.Tag, parseTimeseriesValue(is.Values[i]))
+	}
+	if onConflictDoNothing {
+		str.WriteString(" ON CONFLICT DO NOTHING")
+	}
+	return str.String(), args
 }
 
 func (dbh *DbHandler) writeToDB(sqlStr string) error {
