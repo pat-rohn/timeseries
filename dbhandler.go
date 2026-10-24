@@ -23,6 +23,10 @@ const (
 	columnFloatType        int    = 1
 	columnTextType         int    = 2
 	DefaultTimeseriesTable string = "measurements"
+
+	// maxOpenConns bounds the connection pool; Postgres refuses connections
+	// beyond max_connections (100 by default), shared with other clients.
+	maxOpenConns = 20
 )
 
 type DBConfig struct {
@@ -108,6 +112,7 @@ func (dbh *DbHandler) openDatabase() error {
 		}
 		dbh.DB = database
 	}
+	dbh.DB.SetMaxOpenConns(maxOpenConns)
 	log.WithFields(logFields).Infof("Opened database with name %s ",
 		dbh.conf.Name)
 
