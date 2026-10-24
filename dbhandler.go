@@ -530,9 +530,12 @@ func GetDefaultDBConfig() DBConfig {
 	}
 }
 
-// CreateTimeseriesTable creates a table for timeseries values.
-// Consider adding timescaledb features for postgres.
+// CreateTimeseriesTable creates a table for timeseries values and its
+// (tag, time) index. Consider adding timescaledb features for postgres.
 func (dbh *DbHandler) CreateTimeseriesTable(tableName string) error {
+	if !tableNamePattern.MatchString(tableName) {
+		return fmt.Errorf("invalid table name %q", tableName)
+	}
 	timeStampStr := "DATETIME"
 	if dbh.conf.UsePostgres {
 		timeStampStr = "TIMESTAMP"
@@ -545,7 +548,12 @@ func (dbh *DbHandler) CreateTimeseriesTable(tableName string) error {
 		comment    TEXT                DEFAULT ''
 	   );
 	 `
-	return dbh.writeToDB(sqlStr)
+	if err := dbh.writeToDB(sqlStr); err != nil {
+		return err
+	}
+	// Grafana queries filter by tag and time range. Building the index on an
+	// existing large table takes a while once, on the first start.
+	return dbh.writeToDB(`CREATE INDEX IF NOT EXISTS ` + tableName + `_tag_time_idx ON ` + tableName + ` (tag, time)`)
 }
 
 // insertTimeseriesBatchRows bounds the rows per INSERT statement; 3 bind
