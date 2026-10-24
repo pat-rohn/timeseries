@@ -49,23 +49,30 @@ type DbHandler struct {
 var dbhandler *DbHandler
 var singletonMu sync.Mutex
 
+// Open opens a handler of its own, independent of the DBHandler singleton.
+func Open(conf DBConfig) (*DbHandler, error) {
+	dbh := &DbHandler{
+		conf:      conf,
+		timeout:   time.Second * 10,
+		semaphore: make(chan struct{}, 10),
+	}
+	if err := dbh.openDatabase(); err != nil {
+		return nil, err
+	}
+	return dbh, nil
+}
+
 // DBHandler returns the process-wide handler, opening it on first use and
-// again after Close.
+// again after Close. Prefer Open and pass the handler on.
 func DBHandler(conf DBConfig) *DbHandler {
 	singletonMu.Lock()
 	defer singletonMu.Unlock()
 	if dbhandler == nil {
-		dbh := &DbHandler{
-			conf:      conf,
-			mutex:     sync.Mutex{},
-			timeout:   time.Second * 10,
-			semaphore: make(chan struct{}, 10),
-		}
-		if err := dbh.openDatabase(); err != nil {
+		dbh, err := Open(conf)
+		if err != nil {
 			log.WithField("package", logPkg).Fatalf(
 				"Failed to create database: %v", err)
 		}
-		log.Infof("%+v", dbh.conf)
 		dbhandler = dbh
 	}
 	return dbhandler

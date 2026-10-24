@@ -15,7 +15,6 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	embeddedpostgres "github.com/fergusstrange/embedded-postgres"
 )
@@ -83,8 +82,8 @@ func newTestHandler(t *testing.T) *DbHandler {
 			t.Fatalf("create test database: %v", err)
 		}
 	}
-	dbh := &DbHandler{conf: conf, timeout: 10 * time.Second, semaphore: make(chan struct{}, 10)}
-	if err := dbh.openDatabase(); err != nil {
+	dbh, err := Open(conf)
+	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
 	t.Cleanup(func() { dbh.DB.Close() })
