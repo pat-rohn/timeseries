@@ -8,6 +8,7 @@ import (
 // T3: Grafana queries filter by tag and time range; without an index every
 // panel refresh scans the whole table.
 func TestCreateTimeseriesTableIndexesTagAndTime(t *testing.T) {
+	skipOnPostgres(t, "EXPLAIN QUERY PLAN is SQLite syntax")
 	dbh := newTestHandler(t)
 	for i := 0; i < 2; i++ { // idempotent
 		if err := dbh.CreateTimeseriesTable("measurements"); err != nil {

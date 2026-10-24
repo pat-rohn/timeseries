@@ -1,31 +1,14 @@
 package timeseries
 
 import (
-	"path/filepath"
 	"testing"
 	"time"
 )
 
-// newTestHandler opens a private SQLite database in a temp dir, bypassing the
-// process-wide singleton so tests do not share (or close) each other's handle.
-func newTestHandler(t *testing.T) *DbHandler {
-	t.Helper()
-	dbh := &DbHandler{
-		conf:      DBConfig{Name: "test.db", IPOrPath: filepath.Join(t.TempDir()) + "/"},
-		timeout:   10 * time.Second,
-		semaphore: make(chan struct{}, 10),
-	}
-	if err := dbh.openDatabase(); err != nil {
-		t.Fatalf("open database: %v", err)
-	}
-	t.Cleanup(func() { dbh.DB.Close() })
-	return dbh
-}
-
 func countRows(t *testing.T, dbh *DbHandler, table, tag string) int {
 	t.Helper()
 	var n int
-	if err := dbh.DB.QueryRow("SELECT COUNT(*) FROM "+table+" WHERE tag = ?", tag).Scan(&n); err != nil {
+	if err := dbh.DB.QueryRow(dbh.rebindTest("SELECT COUNT(*) FROM "+table+" WHERE tag = ?"), tag).Scan(&n); err != nil {
 		t.Fatalf("count rows in %s: %v", table, err)
 	}
 	return n
@@ -107,7 +90,7 @@ func TestInsertTimeseriesStoresUnparsableValueAsNull(t *testing.T) {
 	if err := dbh.InsertTimeseries(is, true, "measurements"); err != nil {
 		t.Fatalf("InsertTimeseries: %v", err)
 	}
-	rows, err := dbh.DB.Query("SELECT value FROM measurements WHERE tag = ? ORDER BY time", "nullable")
+	rows, err := dbh.DB.Query(dbh.rebindTest("SELECT value FROM measurements WHERE tag = ? ORDER BY time"), "nullable")
 	if err != nil {
 		t.Fatal(err)
 	}
