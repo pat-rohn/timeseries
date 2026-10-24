@@ -58,14 +58,16 @@ func TestInsertTimeseriesAcceptsKnownTimestampFormats(t *testing.T) {
 	if err := dbh.CreateTimeseriesTable("measurements"); err != nil {
 		t.Fatal(err)
 	}
+	// Distinct instants: on Postgres one instant in two formats is the same
+	// (tag, time), and the second would be skipped as a duplicate.
 	is := TimeseriesImportStruct{
 		Tag: "formats",
 		Timestamps: []string{
 			"2026-10-22T19:22:08.499Z",       // firmware CTimeHelper::getTimestamp
-			"2026-10-22 19:22:08.499",        // go-iotedge UpdateSensorHandler / MQTT buffer
-			"2026-10-22 19:22:08",            // SQLite datetime()
-			"2026-10-22T21:22:08.1+02:00",    // RFC3339 with offset
-			"2026-10-22T19:22:08.123456789Z", // RFC3339Nano
+			"2026-10-22 19:22:09.499",        // go-iotedge UpdateSensorHandler / MQTT buffer
+			"2026-10-22 19:22:10",            // SQLite datetime()
+			"2026-10-22T21:22:11.1+02:00",    // RFC3339 with offset
+			"2026-10-22T19:22:12.123456789Z", // RFC3339Nano
 		},
 		Values: []string{"1", "2", "3", "4", "5"},
 	}

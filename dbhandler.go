@@ -556,9 +556,63 @@ func (dbh *DbHandler) CreateTimeseriesTable(tableName string) error {
 	if err := dbh.writeToDB(sqlStr); err != nil {
 		return err
 	}
-	// Grafana queries filter by tag and time range. Building the index on an
-	// existing large table takes a while once, on the first start.
-	return dbh.writeToDB(`CREATE INDEX IF NOT EXISTS ` + tableName + `_tag_time_idx ON ` + tableName + ` (tag, time)`)
+	return dbh.ensureUniqueTagTime(tableName)
+}
+
+// ensureUniqueTagTime gives the table a unique (tag, time) index, which also
+// serves Grafana's tag and time range queries and makes "ON CONFLICT DO
+// NOTHING" skip repeated readings. Tables from older releases may hold
+// duplicates: the first time, they are deleted (the first row inserted is
+// kept, rows without a time are left alone). That and building the index on
+// a large table take a while, once.
+func (dbh *DbHandler) ensureUniqueTagTime(tableName string) error {
+	uniqueIndex := tableName + "_tag_time_uidx"
+	exists, err := dbh.indexExists(uniqueIndex)
+	if err != nil || exists {
+		return err
+	}
+	return dbh.execute(func() error {
+		tx, err := dbh.DB.Begin()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		dedupe := `DELETE FROM ` + tableName + ` WHERE time IS NOT NULL AND rowid NOT IN
+			(SELECT MIN(rowid) FROM ` + tableName + ` WHERE time IS NOT NULL GROUP BY tag, time)`
+		if dbh.conf.UsePostgres {
+			dedupe = `DELETE FROM ` + tableName + ` a USING ` + tableName + ` b
+				WHERE a.tag = b.tag AND a.time = b.time AND a.ctid > b.ctid`
+		}
+		res, err := tx.Exec(dedupe)
+		if err != nil {
+			return fmt.Errorf("remove duplicate readings: %w", err)
+		}
+		if n, err := res.RowsAffected(); err == nil && n > 0 {
+			log.WithField("package", logPkg).Warnf("Removed %d duplicate (tag, time) rows from %s", n, tableName)
+		}
+		for _, stmt := range []string{
+			`CREATE UNIQUE INDEX IF NOT EXISTS ` + uniqueIndex + ` ON ` + tableName + ` (tag, time)`,
+			// Superseded by the unique index.
+			`DROP INDEX IF EXISTS ` + tableName + `_tag_time_idx`,
+		} {
+			if _, err := tx.Exec(stmt); err != nil {
+				return err
+			}
+		}
+		return tx.Commit()
+	})
+}
+
+func (dbh *DbHandler) indexExists(name string) (bool, error) {
+	query := `SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?`
+	if dbh.conf.UsePostgres {
+		// Unquoted identifiers are folded to lower case.
+		query = `SELECT COUNT(*) FROM pg_indexes WHERE indexname = $1`
+		name = strings.ToLower(name)
+	}
+	var n int
+	err := dbh.DB.QueryRow(query, name).Scan(&n)
+	return n > 0, err
 }
 
 // insertTimeseriesBatchRows bounds the rows per INSERT statement; 3 bind
