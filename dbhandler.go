@@ -744,7 +744,7 @@ func (dbh *DbHandler) writeToDB(sqlStr string) error {
 // Do not forget to close rows
 func (db *DbHandler) ExecuteQuery(sqlStr string, args ...any) (*sql.Rows, error) {
 	logFields := log.Fields{"fnct": "executeQuery"}
-	log.WithFields(logFields).Infof("Execute query")
+	log.WithFields(logFields).Tracef("Execute query")
 
 	if len(sqlStr) > 2000 {
 		log.WithFields(logFields).Tracef(
@@ -770,14 +770,14 @@ func (db *DbHandler) ExecuteQuery(sqlStr string, args ...any) (*sql.Rows, error)
 		return nil, err
 	}
 
-	log.WithFields(logFields).Infof("Query executed")
+	log.WithFields(logFields).Tracef("Query executed")
 
 	return rows, nil
 }
 
 func (db *DbHandler) Execute(sqlStr string, args ...any) error {
 	logFields := log.Fields{"fnct": "executeQuery"}
-	log.WithFields(logFields).Infof("Execute query")
+	log.WithFields(logFields).Tracef("Execute query")
 
 	if len(sqlStr) > 2000 {
 		log.WithFields(logFields).Tracef(
