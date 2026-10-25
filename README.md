@@ -1,147 +1,83 @@
-# Database access PostgresSQL
-This package provides different functionialities and structures to store timeseries into a sqlite or postgres database.
+# timeseries
 
-## Install
-```Terminal
-sudo apt install postgresql
+Go library that stores timeseries readings in SQLite (pure Go, modernc) or
+PostgreSQL. Used by [go-iotedge](https://github.com/pat-rohn/go-iotedge).
+
+## Usage
+
+```go
+db, err := timeseries.Open(timeseries.DBConfig{Name: "iot.db", IPOrPath: "./"})
+// Postgres: DBConfig{UsePostgres: true, IPOrPath: host, Port: 5432, Name, User, Password}
+defer db.Close()
+
+db.CreateTimeseriesTable("measurements")
+db.InsertTimeseries(timeseries.TimeseriesImportStruct{
+    Tag:        "livingTemperature",
+    Timestamps: []string{"2026-10-24T10:00:00.000Z"},
+    Values:     []string{"21.5"},
+}, true, "measurements") // true: skip a (tag, time) that is already stored
+
+tags, _ := db.Tags("measurements")
+points, _ := db.Series("measurements", "livingTemperature", from, to)
 ```
 
-## Create and configure tables
-Replace usernames and passwords to your needs.
+- Table: `time`, `tag`, `value` (NULL if not a number), `comment`, with a
+  unique index on `(tag, time)`.
+- **On first start `CreateTimeseriesTable` deletes duplicate `(tag, time)`
+  rows** (keeps the first) before adding that index. Back up older databases.
+- Timestamps: RFC3339 or `YYYY-MM-DD HH:MM:SS[.fff]`, in UTC.
+- `DBHandler(conf)` is the older process-wide singleton; prefer `Open`.
+- The connection pool is capped at 20 connections.
 
-```Terminal
-sudo -u postgres psql
-```
+Tests: `go test ./...`; against an embedded Postgres:
+`TIMESERIES_TEST_POSTGRES=1 go test ./...` (downloads Postgres once).
 
-``` SQL
-CREATE USER "grafanawriteuser";  
-ALTER USER "grafanawriteuser" WITH PASSWORD 'GrafanaWritePassw0rd';  
-CREATE DATABASE plottydb;  
-GRANT ALL PRIVILEGES ON DATABASE "plottydb" TO "grafanawriteuser";  
-GRANT CONNECT ON DATABASE plottydb TO "grafanawriteuser";  
-GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO "grafanawriteuser";  
+## PostgreSQL setup
 
-CREATE USER "grafanaread"; 
-ALTER USER "grafanaread" WITH PASSWORD 'GrafanaReadPassw0rd';  
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO "grafanaread";  
-GRANT CONNECT ON DATABASE plottydb TO "grafanaread";  
-GRANT USAGE ON SCHEMA public TO "grafanaread";  
-GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO "grafanaread";  
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO "grafanaread";  
+```sql
+-- sudo -u postgres psql
+CREATE USER grafanawriteuser WITH PASSWORD '<write password>';
+CREATE DATABASE plottydb OWNER grafanawriteuser;
+
+CREATE USER grafanaread WITH PASSWORD '<read password>';
+GRANT CONNECT ON DATABASE plottydb TO grafanaread;
+\c plottydb
+GRANT USAGE ON SCHEMA public TO grafanaread;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO grafanaread;
+ALTER DEFAULT PRIVILEGES FOR ROLE grafanawriteuser IN SCHEMA public GRANT SELECT ON TABLES TO grafanaread;
 
 ALTER DATABASE plottydb SET statement_timeout = '60s';
-
 ```
 
-### Adapt config to be able to connect from different hosts
-
-```Terminal
-sudo vim /etc/postgresql/11/main/pg_hba.conf
-```
-
-
-```vim
-## IPv4 local connections
-#host    all             all             127.0.0.1/32            md5 #comment this  
-host  all  all 0.0.0.0/0 md5 ## add this  
+To accept connections from other hosts, set `listen_addresses = '*'` in
+`postgresql.conf` and allow only your network in `pg_hba.conf`:
 
 ```
-
-```Terminal
-sudo vim /etc/postgresql/11/main/postgresql.conf
+host  plottydb  all  192.168.1.0/24  scram-sha-256
 ```
 
-```vim
-listen_addresses = '*'
+Then `sudo systemctl restart postgresql`.
+
+For TimescaleDB (hypertable, compression, hourly aggregates) see
+[go-iotedge/doc/TIMESCALEDB.md](https://github.com/pat-rohn/go-iotedge/blob/main/doc/TIMESCALEDB.md).
+Let the library create the table first.
+
+## Maintenance
+
+```sh
+# backup / restore
+pg_dump -h 127.0.0.1 -U grafanawriteuser -d plottydb -Fc -f plottydb.dump
+pg_restore -h 127.0.0.1 -U grafanawriteuser -d plottydb plottydb.dump
 ```
 
-### restart service and check
+```sql
+-- latest readings
+SELECT * FROM measurements ORDER BY time DESC LIMIT 20;
 
-```Terminal
-sudo systemctl status postgresql.service
-ps -f -u  postgres
-sudo lsof -n -u postgres | grep LISTEN
-sudo netstat -ltnp | grep postgres
+-- correct a time shift
+UPDATE measurements SET time = time - INTERVAL '2 hour' WHERE time > '2020-10-24 20:00:00';
 ```
 
-### backup db
-
-```Terminal
-pg_dump -h 127.0.0.1 --user myuser -d plottydb --format plain --file "2019_09_10-livingroom.dump" -t measurements
-```
-
-### restore db
-
-```Terminal
-sudo su postgres 
-postgres@raspberrypi:/home/pi/data$ psql  plottydb < 2019_10_11-livingroom.pgsql
-```
-
-### Correct timeshift
-
-``` SQL
-UPDATE measurements SET timestamp = timestamp - INTERVAL '2 hour' WHERE timestamp > '2020-10-24 20:00:00.000';
-```
-
-### Others useful commands
-
-``` SQL
-postgres-# DROP OWNED BY myuser;
-postgres-# DROP USER "myuser";
-sudo su postgres
-psql -U postgres -d plottydb -c "Select count(timestamp) from measurements;"
-psql -U postgres -d plottydb -h 127.0.0.1 -c "Select count(timestamp) from measurements;"
-select * from measurements order by timestamp desc limit 20;
-select * from measurements where timestamp > '2018-11-04 14:45:28.367' order by timestamp asc limit 10;
-```
-
-## Timeseries
-
-### Needs postgres 11 or 12
-
-[TimescaleDB Docs install](https://docs.timescale.com/latest/getting-started/installation/ubuntu/installation-apt-ubuntu)
-To Upgrade:
-    - Dump database https://www.postgresql.org/docs/12/upgrading.html
-    ```terminal
-        pg_dumpall > outputfile
-    
-    ```
-    - Change port of old postgres to something different (e.g. 5433)(postgresql.conf)
-    - Install new postgres and change port to 5432
-    - Configure database as old one
-    - Deactivate old one [stackoverflow]("https://serverfault.com/questions/542385/how-to-disable-1-version-of-postgresql-server-without-uninstalling-it/542390")
-    - disable old service -> vim /etc/postgresql/10/main/start.conf
-    - restart: sudo service postgresql restart
-
-Connect to database (sudo -u postgres psql)
-
-``` SQL
-CREATE EXTENSION IF NOT EXISTS timesc;
-CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
-```
-
-// create timeseries db
-
-``` SQL
-CREATE TABLE measurements (
- time       TIMESTAMP(3)        NOT NULL,
- tag        TEXT                NOT NULL,
- value      DOUBLE PRECISION    NULL,
- comment    TEXT                DEFAULT '',
- unique (time, tag)
-);
-
-
-SELECT * FROM create_hypertable('measurements','time');
-```
-
-timescaledb-parallel-copy --verbose  --connection="host=localhost --db-name ts_database --table measurements --file old_forcex.csv --workers 4 --copy-options "CSV"
-
-- [TimescaleDB Reading](https://docs.timescale.com/latest/using-timescaledb/reading-data)
-- [TimescaleDB hypertables](https://docs.timescale.com/latest/using-timescaledb/hypertables)
-- [TimescaleDB migrating data](https://docs.timescale.com/latest/getting-started/migrating-data)
-
-```psql
-CREATE TABLE new_table (LIKE old_table INCLUDING DEFAULTS INCLUDING 
-CONSTRAINTS INCLUDING INDEXES);
-```
+Major Postgres upgrade: `pg_dumpall > all.sql` on the old version, install the
+new one, restore with `psql -f all.sql postgres` (or use `pg_upgradecluster`
+on Debian).
